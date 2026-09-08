@@ -21,7 +21,7 @@ EMBEDDING_MODEL=服务商提供的模型名
 EMBEDDING_TIMEOUT_S=20
 ```
 
-`EMBEDDING_BASE_URL` 填到 `/v1`，程序会请求其 `/embeddings` 端点。未配置这三项时使用本地字符 n-gram 向量。
+`EMBEDDING_BASE_URL` 可填到 `/v1`，程序会请求其 `/embeddings` 端点；也可直接填写完整的 `/v1/embeddings` 地址。未配置这三项时使用本地字符 n-gram 向量。
 
 ```bash
 docker compose up -d --build

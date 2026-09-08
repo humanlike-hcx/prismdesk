@@ -31,6 +31,7 @@ def test_remote_embedding_batches_inputs_and_restores_response_order(monkeypatch
     recognizer = IntentRecognizer.__new__(IntentRecognizer)
     recognizer._remote_embedding_enabled = True
     recognizer._embedding_base_url = "https://embedding.example/v1"
+    recognizer._embedding_endpoint = "https://embedding.example/v1/embeddings"
     recognizer._embedding_api_key = "secret"
     recognizer._embedding_model = "test-embedding"
     recognizer._embedding_timeout_s = 5
@@ -69,6 +70,43 @@ def test_remote_embedding_batches_inputs_and_restores_response_order(monkeypatch
     assert captured["url"] == "https://embedding.example/v1/embeddings"
     assert captured["request"]["json"]["input"] == ["退款", "登录失败"]
     assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_remote_embedding_accepts_a_complete_embeddings_endpoint(monkeypatch):
+    recognizer = IntentRecognizer.__new__(IntentRecognizer)
+    recognizer._remote_embedding_enabled = True
+    recognizer._embedding_endpoint = "https://embedding.example/v1/embeddings"
+    recognizer._embedding_api_key = "secret"
+    recognizer._embedding_model = "test-embedding"
+    recognizer._embedding_timeout_s = 5
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            return Response()
+
+    monkeypatch.setattr("core.intent_recognizer.httpx.AsyncClient", Client)
+    vectors = asyncio.run(recognizer._embed_texts(["退款"]))
+
+    assert captured["url"] == "https://embedding.example/v1/embeddings"
+    assert vectors == [[1.0, 0.0]]
 
 
 def test_pattern_only_mode_does_not_call_llm_or_embedding():
