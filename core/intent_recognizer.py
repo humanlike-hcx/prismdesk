@@ -70,15 +70,14 @@ class IntentResult:
 
 # ── Few-shot 模板（同时用于 LLM 示例和 Embedding 匹配）────────────────────────
 _TEMPLATES: Dict[IntentCategory, List[str]] = {
-    # 宽泛类别不放入细粒度业务样本，避免和专属意图在向量空间中直接竞争。
-    IntentCategory.QUERY:      ["会员权益包含哪些内容？", "如何查看服务使用说明？", "支持哪些设备或平台？"],
+    IntentCategory.QUERY:      ["我的订单状态是什么？", "如何重置密码？", "快递什么时候到？"],
     IntentCategory.COMPLAINT:  ["等了好几个小时！", "服务太差了！", "一直没人处理！"],
-    IntentCategory.REQUEST:    ["请将营销推送设为不接收", "帮我开启深色模式", "协助变更预约时间"],
-    IntentCategory.GREETING:   ["你好", "早上好", "hello"],
-    IntentCategory.ESCALATION: ["请升级至管理团队审核", "该问题需要负责人书面答复", "请走正式的升级处理流程"],
-    IntentCategory.TECHNICAL:  ["上传文件时页面没有响应", "某项功能无法正常保存", "页面加载后内容为空"],
-    IntentCategory.BILLING:    ["订阅按什么周期收费", "会员升级的费用怎么算", "账单中每一项费用代表什么"],
-    IntentCategory.ACCOUNT:    ["怎么修改昵称", "如何更新个人资料", "我要换绑手机号"],
+    IntentCategory.REQUEST:    ["帮我取消订单", "我需要修改地址", "请协助退款"],
+    IntentCategory.GREETING:   ["你好", "嗨，有人吗", "早上好"],
+    IntentCategory.ESCALATION: ["我要投诉！", "转人工客服", "找你们经理"],
+    IntentCategory.TECHNICAL:  ["应用一直崩溃", "无法登录", "出现500错误"],
+    IntentCategory.BILLING:    ["为什么扣了两次款？", "申请退款", "发票问题"],
+    IntentCategory.ACCOUNT:    ["修改邮箱", "注销账户", "更新个人信息"],
     IntentCategory.FEEDBACK:   ["服务很棒！", "非常满意", "给个好评"],
     IntentCategory.ORDER_STATUS: ["我的订单现在是什么状态？", "订单有没有发货？", "订单处理到哪一步了？"],
     IntentCategory.LOGISTICS: ["快递什么时候到？", "物流一直不更新", "配送要多久？"],
@@ -88,7 +87,7 @@ _TEMPLATES: Dict[IntentCategory, List[str]] = {
     IntentCategory.ACCOUNT_SECURITY: ["账户被盗了", "发现异常登录", "我要重置密码"],
     IntentCategory.TECHNICAL_LOGIN: ["登录一直报401", "验证码收不到", "无法登录账号"],
     IntentCategory.TECHNICAL_CRASH: ["应用一直崩溃", "页面报500错误", "系统闪退"],
-    IntentCategory.HUMAN_HANDOFF: ["请转接真人客服", "我希望和人工坐席沟通", "不要机器人回复，请接人工"],
+    IntentCategory.HUMAN_HANDOFF: ["转人工客服", "我要找人工", "请升级处理"],
 }
 
 _SPECIFIC_INTENTS = {
