@@ -14,6 +14,7 @@ from agents.agent_orchestrator import (
     build_shared_rag_tools,
 )
 from core.intent_recognizer import IntentCategory, UrgencyLevel
+from core.rag_policy import RAGPolicy
 
 
 class FakeClient:
@@ -201,3 +202,98 @@ def test_tool_use_round_trip_executes_only_whitelisted_tool():
         "build_diagnostic_plan",
     }
     assert "tool_result" in str(client.calls[1]["messages"])
+
+
+def test_forbidden_rag_policy_hides_knowledge_tool_from_model():
+    class TextBlock:
+        type = "text"
+        text = "你好，请问有什么可以帮你？"
+
+    client = FakeClient(type("Response", (), {"content": [TextBlock()]})())
+    agent = GeneralAgent(client, "test-model")
+    agent.set_shared_tools(build_shared_rag_tools(object()))
+
+    response = asyncio.run(agent.handle(make_request(
+        message="你好",
+        intent=IntentCategory.GREETING,
+        rag_policy=RAGPolicy.FORBIDDEN,
+    )))
+
+    assert response.success is True
+    assert "search_knowledge_base" not in {tool["name"] for tool in client.calls[0]["tools"]}
+
+
+def test_prefetched_rag_is_not_requested_twice():
+    class TextBlock:
+        type = "text"
+        text = "退款通常会原路退回。"
+
+    client = FakeClient(type("Response", (), {"content": [TextBlock()]})())
+    agent = BillingAgent(client, "test-model")
+    agent.set_shared_tools(build_shared_rag_tools(object()))
+
+    response = asyncio.run(agent.handle(make_request(
+        message="退款多久到账",
+        intent=IntentCategory.REFUND,
+        rag_policy=RAGPolicy.REQUIRED,
+        rag_prefetched=True,
+    )))
+
+    assert response.success is True
+    assert "search_knowledge_base" not in {tool["name"] for tool in client.calls[0]["tools"]}
+
+
+def test_tool_trace_is_returned_with_the_same_request():
+    class ToolUseBlock:
+        type = "tool_use"
+        id = "toolu_trace"
+        name = "lookup_error_code"
+        input = {"error_code": "401"}
+
+    class TextBlock:
+        type = "text"
+        text = "排查完成。"
+
+    class ToolClient:
+        def __init__(self):
+            self.responses = [
+                type("Response", (), {"content": [ToolUseBlock()]})(),
+                type("Response", (), {"content": [TextBlock()]})(),
+            ]
+
+        class Messages:
+            def __init__(self, owner):
+                self.owner = owner
+
+            async def create(self, **kwargs):
+                return self.owner.responses.pop(0)
+
+        @property
+        def messages(self):
+            return self.Messages(self)
+
+    agent = TechnicalAgent(ToolClient(), "test-model")
+    response = asyncio.run(agent.handle(make_request()))
+
+    assert response.tools_used == ["lookup_error_code"]
+    assert response.tool_traces[0]["tool_use_id"] == "toolu_trace"
+    assert not hasattr(agent, "_last_tool_traces")
+
+
+def test_rag_fallback_is_not_reported_as_successful_retrieval():
+    class RagManager:
+        async def search_with_rewrite(self, tool_name, query, top_k=5):
+            return type("Result", (), {
+                "success": True,
+                "error": "vector store unavailable",
+                "data": [{"title": "降级结果", "content": "请稍后重试", "fallback": True}],
+                "reranked": False,
+                "cached": False,
+            })()
+
+    spec = build_shared_rag_tools(RagManager())["search_knowledge_base"]
+    result = asyncio.run(spec.handler(make_request(), {"query": "退款规则"}))
+
+    assert result["success"] is False
+    assert result["fallback"] is True
+    assert result["results"] == []

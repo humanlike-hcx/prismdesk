@@ -11,6 +11,7 @@ import pathlib
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -62,6 +63,21 @@ def _anthropic_cfg() -> Dict[str, Any]:
     return cfg
 
 
+def _embedding_cfg() -> Dict[str, Any]:
+    """读取独立的 OpenAI 兼容 Embedding 服务配置。"""
+    try:
+        timeout_s = float(os.getenv("EMBEDDING_TIMEOUT_S", "20"))
+    except (TypeError, ValueError):
+        logger.warning("忽略非法 EMBEDDING_TIMEOUT_S，使用 20 秒")
+        timeout_s = 20.0
+    return {
+        "embedding_api_key": os.getenv("EMBEDDING_API_KEY", "").strip(),
+        "embedding_base_url": os.getenv("EMBEDDING_BASE_URL", "").strip(),
+        "embedding_model": os.getenv("EMBEDDING_MODEL", "").strip(),
+        "embedding_timeout_s": timeout_s,
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
@@ -78,6 +94,7 @@ async def lifespan(app: FastAPI):
     from core.skill_loader import SkillManager
 
     cfg = _anthropic_cfg()
+    embedding_cfg = _embedding_cfg()
     logger.info(f"模型: {cfg['model']}  base_url: {cfg.get('base_url', '(官方)')}")
 
     # 意图识别器（Orchestrator 内部也会创建，这里单独暴露给 Evaluator）
@@ -85,6 +102,7 @@ async def lifespan(app: FastAPI):
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
         model=cfg["model"],
+        **embedding_cfg,
     )
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。
@@ -101,6 +119,7 @@ async def lifespan(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         skill_manager=_skill_manager,
+        **embedding_cfg,
     )
 
     # 记忆管理器（Redis 工作记忆 + ChromaDB 情景记忆/用户画像）
@@ -225,6 +244,10 @@ class ChatResponse(BaseModel):
     escalated:   bool
     latency_ms:  float
     knowledge_used: bool = False
+    rag_policy: str = "optional"
+    retrieval_attempted: bool = False
+    retrieval_success: bool = False
+    retrieved_count: int = 0
     entities: Dict[str, List[str]] = Field(default_factory=dict)
     intent_confidence: float = 0.0
     intent_source_scores: Dict[str, float] = Field(default_factory=dict)
@@ -292,6 +315,14 @@ async def chat(req: ChatRequest):
 
     intent_result = await _orchestrator.recognize_intent(req.message, history=history)
     full_context = mem_ctx.to_prompt_text()
+    from core.rag_policy import RAGPolicy, decide_rag_policy
+
+    rag_policy = decide_rag_policy(req.message, intent_result.intent)
+    retrieval = KnowledgeContextResult()
+    if rag_policy == RAGPolicy.REQUIRED:
+        retrieval = await _build_knowledge_context(req.message, top_k=3)
+        if retrieval.context:
+            full_context = "\n\n".join(part for part in (full_context, retrieval.context) if part)
 
     orch_req = OrcReq(
         message=req.message,
@@ -304,10 +335,21 @@ async def chat(req: ChatRequest):
         intent_group=intent_result.intent_group,
         urgency=intent_result.urgency,
         intent_confidence=intent_result.confidence,
+        rag_policy=rag_policy,
+        rag_prefetched=retrieval.success,
     )
 
     # 3. 执行
     result = await _orchestrator.run(orch_req)
+    rag_tool_traces = [
+        trace for trace in result.tool_traces
+        if trace.get("tool_name") == "search_knowledge_base"
+    ]
+    agent_retrieval_attempted = bool(rag_tool_traces)
+    agent_retrieval_success = any(
+        trace.get("success") and trace.get("result_success") is not False
+        for trace in rag_tool_traces
+    )
 
     # 4. 写入记忆
     await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
@@ -331,32 +373,52 @@ async def chat(req: ChatRequest):
         routing_confidence=result.routing_confidence,
         escalated=result.escalated,
         latency_ms=round(result.latency_ms, 1),
-        knowledge_used="search_knowledge_base" in result.tools_used,
+        knowledge_used=retrieval.success or agent_retrieval_success,
+        rag_policy=rag_policy.value,
+        retrieval_attempted=retrieval.attempted or agent_retrieval_attempted,
+        retrieval_success=retrieval.success or agent_retrieval_success,
+        retrieved_count=retrieval.count or max(
+            (int(trace.get("result_count", 0) or 0) for trace in rag_tool_traces),
+            default=0,
+        ),
         entities=intent_result.entities,
         intent_confidence=round(intent_result.confidence, 4),
         intent_source_scores=intent_result.source_scores,
     )
 
 
-async def _build_knowledge_context(message: str, intent=None, top_k: int = 3) -> tuple[str, bool]:
+@dataclass
+class KnowledgeContextResult:
+    context: str = ""
+    attempted: bool = False
+    success: bool = False
+    count: int = 0
+
+
+async def _build_knowledge_context(message: str, top_k: int = 3) -> KnowledgeContextResult:
     """
     为 /chat 主链路构建 RAG 知识上下文。
 
     这里复用 MCPToolManager 的查询改写、并行召回、重排、fallback 能力。
     """
     if _tool_manager is None:
-        return "", False
-    if not _should_use_knowledge(message, intent=intent):
-        return "", False
+        return KnowledgeContextResult()
     try:
         result = await _tool_manager.search_with_rewrite("knowledge_search", message, top_k=top_k)
-        if not result.success or not isinstance(result.data, list) or not result.data:
-            return "", False
+        if (
+            not result.success
+            or getattr(result, "error", None)
+            or not isinstance(result.data, list)
+            or not result.data
+        ):
+            return KnowledgeContextResult(attempted=True)
 
         parts = ["[知识库检索结果]"]
         used = False
         for i, item in enumerate(result.data[:top_k], start=1):
             if not isinstance(item, dict):
+                continue
+            if item.get("fallback"):
                 continue
             title = str(item.get("title", "未命名文档"))
             content = str(item.get("content", "")).strip()
@@ -367,37 +429,17 @@ async def _build_knowledge_context(message: str, intent=None, top_k: int = 3) ->
             parts.append(f"{i}. 标题: {title}\n   相关度: {score}\n   内容: {content[:600]}")
 
         if not used:
-            return "", False
+            return KnowledgeContextResult(attempted=True)
         parts.append("请优先依据以上知识库内容回答；如果知识库内容不足，再结合通用客服能力说明。")
-        return "\n".join(parts), True
+        return KnowledgeContextResult(
+            context="\n".join(parts),
+            attempted=True,
+            success=True,
+            count=len(parts) - 2,
+        )
     except Exception as ex:
         logger.warning(f"构建知识库上下文失败: {ex}")
-        return "", False
-
-
-def _should_use_knowledge(message: str, intent=None) -> bool:
-    """跳过纯寒暄，业务类问题才检索知识库，避免无关 RAG 干扰回复。"""
-    msg = (message or "").strip().lower()
-    if not msg:
-        return False
-    intent_value = getattr(intent, "value", intent)
-    if intent_value in {"greeting", "feedback", "escalation", "human_handoff", "other"}:
-        return False
-    if intent_value in {
-        "query", "request", "technical", "billing", "account", "complaint",
-        "order_status", "logistics", "refund", "invoice", "payment_issue",
-        "account_security", "technical_login", "technical_crash",
-    }:
-        return True
-    greetings = {"你好", "您好", "嗨", "hi", "hello", "hey", "早上好", "晚上好"}
-    if msg in greetings:
-        return False
-    business_keywords = [
-        "退款", "订单", "物流", "配送", "发票", "扣款", "支付", "账单", "订阅",
-        "登录", "报错", "错误", "崩溃", "会员", "积分", "账户", "密码", "地址",
-        "refund", "order", "invoice", "payment", "error", "login",
-    ]
-    return len(msg) >= 4 or any(kw in msg for kw in business_keywords)
+        return KnowledgeContextResult(attempted=True)
 
 
 @app.get("/monitor")
@@ -477,6 +519,7 @@ class EvalRunInput(BaseModel):
     """评测请求。为空时使用内置默认用例。"""
     intent_cases: Optional[List[EvalIntentInput]] = None
     dialog_cases: Optional[List[EvalDialogInput]] = None
+    intent_sources: Optional[List[str]] = None
 
 
 @app.post("/knowledge/add", tags=["知识库"])
@@ -590,6 +633,7 @@ async def run_eval(body: Optional[EvalRunInput] = None):
     report = await _evaluator.run(
         intent_cases=intent_cases,
         dialog_cases=dialog_cases,
+        intent_sources=body.intent_sources if body else None,
     )
     return {
         "pass_rate":       report.pass_rate,
@@ -621,6 +665,7 @@ async def _cli():
     from core.skill_loader import SkillManager
 
     cfg = _anthropic_cfg()
+    embedding_cfg = _embedding_cfg()
     skill_manager = SkillManager(
         root_dir=os.getenv("PRISMDESK_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills")),
         max_prompt_chars=int(os.getenv("PRISMDESK_SKILLS_MAX_PROMPT_CHARS", "5000")),
@@ -631,6 +676,7 @@ async def _cli():
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         skill_manager=skill_manager,
+        **embedding_cfg,
     )
     mem  = MemoryManager(
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),

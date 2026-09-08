@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from anthropic import AsyncAnthropic
+import httpx
 
 from core.llm_utils import extract_text_content
 
@@ -151,6 +152,10 @@ class IntentRecognizer:
         base_url: Optional[str] = None,
         model: str = "claude-3-5-sonnet-20241022",
         confidence_threshold: float = 0.5,
+        embedding_api_key: Optional[str] = None,
+        embedding_base_url: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_timeout_s: float = 20.0,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -158,8 +163,15 @@ class IntentRecognizer:
         self.client    = AsyncAnthropic(**kwargs)
         self.model     = model
         self.threshold = confidence_threshold
-        # 本地字符 n-gram 向量始终可用；如果未来客户端暴露 embeddings 资源，
-        # _embed_text 会优先尝试远端向量，否则自动回退本地向量。
+        self._embedding_api_key = (embedding_api_key or "").strip()
+        self._embedding_base_url = (embedding_base_url or "").strip().rstrip("/")
+        self._embedding_model = (embedding_model or "").strip()
+        self._embedding_timeout_s = embedding_timeout_s
+        self._remote_embedding_enabled = bool(
+            self._embedding_api_key and self._embedding_base_url and self._embedding_model
+        )
+        # 未配置远端服务时使用本地字符 n-gram 向量。
+        # 已配置远端服务后，调用失败会让该路识别失败，避免混用不同维度的向量。
         self._embedding_enabled = True
 
         self._tpl_embeddings: Dict[IntentCategory, List[List[float]]] = {}
@@ -173,13 +185,19 @@ class IntentRecognizer:
         self,
         message: str,
         history: Optional[List[Dict[str, str]]] = None,
+        sources: Optional[List[str]] = None,
     ) -> IntentResult:
         """
         识别用户意图。
 
         history 格式：[{"role": "user"/"assistant", "content": "..."}]
         """
-        key = self._cache_key(message, history)
+        active_sources = set(sources or ["llm", "embedding", "pattern"])
+        invalid_sources = active_sources - {"llm", "embedding", "pattern"}
+        if not active_sources or invalid_sources:
+            raise ValueError(f"无效的意图识别来源: {sorted(invalid_sources) or '空列表'}")
+
+        key = self._cache_key(message, history, active_sources)
         if key in self._cache:
             self.cache_hits += 1
             return self._cache[key]
@@ -188,17 +206,23 @@ class IntentRecognizer:
         t0 = time.monotonic()
 
         # LLM 和 Embedding 并行（Embedding 不可用时跳过）
-        llm_task = asyncio.create_task(self._llm_recognize(message, history))
-        emb_task = asyncio.create_task(self._embedding_recognize(message)) if self._embedding_enabled else None
-        pat      = self._pattern_recognize(message)
+        llm_task = asyncio.create_task(self._llm_recognize(message, history)) if "llm" in active_sources else None
+        emb_task = (
+            asyncio.create_task(self._embedding_recognize(message))
+            if "embedding" in active_sources and self._embedding_enabled else None
+        )
+        pat = self._pattern_recognize(message) if "pattern" in active_sources else {
+            "intent": IntentCategory.OTHER, "confidence": 0.0
+        }
+        pending = [task for task in (llm_task, emb_task) if task is not None]
+        if pending:
+            await asyncio.gather(*pending)
+        llm = llm_task.result() if llm_task else {
+            "intent": IntentCategory.OTHER, "confidence": 0.0, "failed": True
+        }
+        emb = emb_task.result() if emb_task else {"intent": IntentCategory.OTHER, "confidence": 0.0}
 
-        if emb_task:
-            llm, emb = await asyncio.gather(llm_task, emb_task)
-        else:
-            llm = await llm_task
-            emb = {"intent": IntentCategory.OTHER, "confidence": 0.0}
-
-        intent, confidence, source_scores = self._vote(llm, emb, pat)
+        intent, confidence, source_scores = self._vote(llm, emb, pat, active_sources)
         entities = self._extract_entities(message)
         urgency  = self._urgency(message, intent)
 
@@ -256,8 +280,10 @@ class IntentRecognizer:
 如果用户问题能匹配细粒度业务意图，请优先返回细粒度意图，而不是宽泛大类。
 例如退款优先返回 refund，发票优先返回 invoice，登录故障优先返回 technical_login。
 
-        {ctx}
-        用户消息: "{message}"
+示例:
+{examples}
+{ctx}
+用户消息: "{message}"
 
 返回格式（仅 JSON，不要其他文字）:
 {{"intent": "<意图值>", "confidence": <0-1>, "reasoning": "<一句话说明>"}}
@@ -335,24 +361,35 @@ class IntentRecognizer:
 
     # ── 投票合并 ──────────────────────────────────────────────────────────────
 
-    def _vote(self, llm: Dict, emb: Dict, pat: Dict) -> tuple[IntentCategory, float, Dict[str, float]]:
+    def _vote(
+        self,
+        llm: Dict,
+        emb: Dict,
+        pat: Dict,
+        active_sources: Optional[set[str]] = None,
+    ) -> tuple[IntentCategory, float, Dict[str, float]]:
         """加权投票。返回最终意图、融合置信度和各路来源得分。"""
         source_scores = {
             "llm": float(llm.get("confidence", 0.0) or 0.0),
             "embedding": float(emb.get("confidence", 0.0) or 0.0),
             "pattern": float(pat.get("confidence", 0.0) or 0.0),
         }
-        if llm.get("failed"):
+        active_sources = active_sources or {"llm", "embedding", "pattern"}
+        if "llm" in active_sources and llm.get("failed"):
             if emb.get("intent") != IntentCategory.OTHER and emb.get("confidence", 0.0) > 0:
                 return emb["intent"], source_scores["embedding"], source_scores
             if pat.get("intent") != IntentCategory.OTHER and pat.get("confidence", 0.0) > 0:
                 return pat["intent"], source_scores["pattern"], source_scores
             return IntentCategory.OTHER, 0.0, source_scores
 
-        if self._embedding_enabled:
-            weights = [(llm, 0.7), (emb, 0.2), (pat, 0.1)]
-        else:
-            weights = [(llm, 0.85), (pat, 0.15)]
+        named_results = {"llm": llm, "embedding": emb, "pattern": pat}
+        base_weights = {"llm": 0.7, "embedding": 0.2, "pattern": 0.1}
+        enabled_weight = sum(base_weights[name] for name in active_sources)
+        weights = [
+            (named_results[name], base_weights[name] / enabled_weight)
+            for name in ("llm", "embedding", "pattern")
+            if name in active_sources
+        ]
         scores: Dict[IntentCategory, float] = {}
         for result, w in weights:
             cat  = result.get("intent", IntentCategory.OTHER)
@@ -363,7 +400,13 @@ class IntentRecognizer:
         best_score = scores[best]
         pat_intent = pat.get("intent", IntentCategory.OTHER)
         pat_conf = float(pat.get("confidence", 0.0) or 0.0)
-        if best in _GENERIC_INTENTS and pat_intent in _SPECIFIC_INTENTS and pat_conf >= 0.5 and best_score < 0.8:
+        if (
+            "pattern" in active_sources
+            and best in _GENERIC_INTENTS
+            and pat_intent in _SPECIFIC_INTENTS
+            and pat_conf >= 0.5
+            and best_score < 0.8
+        ):
             source_scores["refined_by_pattern"] = pat_conf
             return pat_intent, max(best_score, pat_conf), source_scores
         if best_score < self.threshold:
@@ -395,7 +438,7 @@ class IntentRecognizer:
             return
 
         all_texts = [t for cat in missing for t in _TEMPLATES[cat]]
-        vecs = [await self._embed_text(text) for text in all_texts]
+        vecs = await self._embed_texts(all_texts)
         idx = 0
         for cat in missing:
             n = len(_TEMPLATES[cat])
@@ -403,22 +446,35 @@ class IntentRecognizer:
             idx += n
 
     async def _embed_text(self, text: str) -> List[float]:
-        """
-        生成文本向量。
+        """生成单条文本向量。"""
+        return (await self._embed_texts([text]))[0]
 
-        如果未来接入的官方/兼容客户端提供 embeddings.create，会优先使用远端向量；
-        当前 Anthropic SDK 没有该资源时，退化为字符 n-gram 哈希向量。这样不会因为
-        Embedding 服务缺失导致三路融合中断。
-        """
-        embeddings = getattr(self.client, "embeddings", None)
-        if embeddings is not None:
+    async def _embed_texts(self, texts: List[str]) -> List[List[float]]:
+        """通过 OpenAI 兼容接口批量生成向量，模板初始化只发起一次请求。"""
+        if self._remote_embedding_enabled:
             try:
-                resp = await embeddings.create(model="voyage-3-lite", input=[text])
-                return list(resp.data[0].embedding)
+                headers = {
+                    "Authorization": f"Bearer {self._embedding_api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {"model": self._embedding_model, "input": texts}
+                async with httpx.AsyncClient(timeout=self._embedding_timeout_s) as client:
+                    response = await client.post(
+                        f"{self._embedding_base_url}/embeddings",
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    data = response.json().get("data", [])
+                ordered = sorted(data, key=lambda item: int(item.get("index", 0)))
+                vectors = [list(item["embedding"]) for item in ordered]
+                if len(vectors) != len(texts) or any(not vector for vector in vectors):
+                    raise ValueError("Embedding 返回的向量数量或内容不正确")
+                return vectors
             except Exception as ex:
-                logger.warning(f"远端 Embedding 失败，使用本地向量兜底: {ex}")
+                raise RuntimeError(f"远端 Embedding 调用失败: {ex}") from ex
 
-        return self._local_embedding(text)
+        return [self._local_embedding(text) for text in texts]
 
     @staticmethod
     def _local_embedding(text: str, dims: int = 256) -> List[float]:
@@ -450,8 +506,16 @@ class IntentRecognizer:
             return UrgencyLevel.MEDIUM
         return UrgencyLevel.LOW
 
-    def _cache_key(self, message: str, history: Optional[List[Dict[str, str]]] = None) -> str:
-        payload = {"message": self._clean_text(message)[:200]}
+    def _cache_key(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        sources: Optional[set[str]] = None,
+    ) -> str:
+        payload = {
+            "message": self._clean_text(message)[:200],
+            "sources": sorted(sources or {"llm", "embedding", "pattern"}),
+        }
         if history:
             payload["history"] = [
                 {

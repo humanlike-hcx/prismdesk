@@ -40,6 +40,7 @@ from agents.tools import (
 )
 from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
 from core.llm_utils import extract_text_content
+from core.rag_policy import RAGPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,14 @@ class AgentResponse:
 
 
 @dataclass
+class AgentGeneration:
+    """一次生成调用的请求级结果，避免并发请求共享可变轨迹。"""
+    content: str
+    tools_used: List[str] = field(default_factory=list)
+    tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class Request:
     message:     str
     user_id:     str
@@ -133,6 +142,8 @@ class Request:
     intent_group: Optional[str] = None
     urgency:     Optional[UrgencyLevel]   = None
     intent_confidence: float = 1.0
+    rag_policy: RAGPolicy = RAGPolicy.OPTIONAL
+    rag_prefetched: bool = False
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
 
 
@@ -191,8 +202,6 @@ class BaseAgent:
         self._model  = self.profile.model or model
         self._skill_manager = skill_manager
         self.stats   = AgentStats()
-        self._last_tools_used: List[str] = []
-        self._last_tool_traces: List[Dict[str, Any]] = []
         self._shared_tools: Dict[str, AgentToolSpec] = {}
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
@@ -205,22 +214,20 @@ class BaseAgent:
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
-        self._last_tools_used = []
-        self._last_tool_traces = []
         try:
-            content = await self._call_llm(req)
+            generation = await self._call_llm(req)
             ms = (time.monotonic() - t0) * 1000
             self.stats.success += 1
             self.stats.total_ms += ms
-            escalate = self._needs_escalation(content)
+            escalate = self._needs_escalation(generation.content)
             return AgentResponse(
                 agent_type=self.agent_type,
-                content=content,
+                content=generation.content,
                 success=True,
                 latency_ms=ms,
                 escalate=escalate,
-                tools_used=list(self._last_tools_used),
-                tool_traces=list(self._last_tool_traces),
+                tools_used=generation.tools_used,
+                tool_traces=generation.tool_traces,
             )
         except Exception as ex:
             ms = (time.monotonic() - t0) * 1000
@@ -231,10 +238,9 @@ class BaseAgent:
                 content="抱歉，处理您的请求时出现问题，请稍后重试。",
                 success=False,
                 latency_ms=ms,
-                tool_traces=list(self._last_tool_traces),
             )
 
-    async def _call_llm(self, req: Request) -> str:
+    async def _call_llm(self, req: Request) -> AgentGeneration:
         def _clean(s: str) -> str:
             return s.encode("utf-8", errors="ignore").decode("utf-8")
 
@@ -253,6 +259,8 @@ class BaseAgent:
         messages.append({"role": "user", "content": _clean(req.message)})
 
         tools = self.get_tools()
+        if req.rag_policy == RAGPolicy.FORBIDDEN or req.rag_prefetched:
+            tools.pop("search_knowledge_base", None)
         tools_used: List[str] = []
         tool_traces: List[Dict[str, Any]] = []
         for _ in range(3):
@@ -275,8 +283,11 @@ class BaseAgent:
             resp = await self._client.messages.create(**request_kwargs)
             tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
             if not tool_uses:
-                self._last_tools_used = tools_used
-                return extract_text_content(resp.content)
+                return AgentGeneration(
+                    content=extract_text_content(resp.content),
+                    tools_used=tools_used,
+                    tool_traces=tool_traces,
+                )
 
             messages.append({"role": "assistant", "content": resp.content})
             tool_results = []
@@ -321,6 +332,7 @@ class BaseAgent:
                         "latency_ms": round(tool_latency_ms, 1),
                         "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
                         "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
+                        "result_count": len(result.get("results", [])) if isinstance(result, dict) else 0,
                         "error": error_text,
                     }
                 )
@@ -331,8 +343,6 @@ class BaseAgent:
                 })
             messages.append({"role": "user", "content": tool_results})
 
-        self._last_tools_used = tools_used
-        self._last_tool_traces = tool_traces
         raise RuntimeError(f"{self.agent_type.value} 工具调用超过最大轮数")
 
     @staticmethod
@@ -645,13 +655,25 @@ class AgentOrchestrator:
         model:    str = "claude-3-5-sonnet-20241022",
         skill_manager: Optional[Any] = None,
         rag_tool_manager: Optional[Any] = None,
+        embedding_api_key: Optional[str] = None,
+        embedding_base_url: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_timeout_s: float = 20.0,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         client = AsyncAnthropic(**kwargs)
 
-        self._intent_recognizer = IntentRecognizer(api_key=api_key, base_url=base_url, model=model)
+        self._intent_recognizer = IntentRecognizer(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            embedding_api_key=embedding_api_key,
+            embedding_base_url=embedding_base_url,
+            embedding_model=embedding_model,
+            embedding_timeout_s=embedding_timeout_s,
+        )
         self._skill_manager = skill_manager
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}

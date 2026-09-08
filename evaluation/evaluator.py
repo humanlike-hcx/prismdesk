@@ -39,6 +39,30 @@ class IntentTestCase:
     message:          str
     expected_intent:  str
     context:          Optional[Dict[str, Any]] = None
+    test_id:          str = ""
+
+
+def load_intent_cases(path: pathlib.Path) -> List[IntentTestCase]:
+    """读取版本化 JSONL，并在运行评测前校验标签和重复样本。"""
+    valid_labels = {intent.value for intent in IntentCategory}
+    cases: List[IntentTestCase] = []
+    seen_ids = set()
+    seen_messages = set()
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not raw.strip():
+            continue
+        data = json.loads(raw)
+        test_id = str(data.get("id", "")).strip()
+        message = str(data.get("message", "")).strip()
+        expected = str(data.get("expected_intent", "")).strip()
+        if not test_id or not message or expected not in valid_labels:
+            raise ValueError(f"{path}:{line_no} 包含无效的 id、message 或意图标签")
+        if test_id in seen_ids or message in seen_messages:
+            raise ValueError(f"{path}:{line_no} 包含重复 id 或消息")
+        seen_ids.add(test_id)
+        seen_messages.add(message)
+        cases.append(IntentTestCase(message, expected, test_id=test_id))
+    return cases
 
 
 @dataclass
@@ -163,16 +187,21 @@ class IntentEvaluator:
     def __init__(self, recognizer: IntentRecognizer):
         self._recognizer = recognizer
 
-    async def evaluate(self, cases: List[IntentTestCase]) -> Dict[str, Any]:
+    async def evaluate(
+        self,
+        cases: List[IntentTestCase],
+        sources: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         predictions, ground_truth = [], []
         case_details: List[Dict[str, Any]] = []
 
         for case in cases:
-            result = await self._recognizer.recognize(case.message)
+            result = await self._recognizer.recognize(case.message, sources=sources)
             predicted = result.intent.value
             predictions.append(predicted)
             ground_truth.append(case.expected_intent)
             case_details.append({
+                "test_id": case.test_id,
                 "message": case.message,
                 "expected": case.expected_intent,
                 "predicted": predicted,
@@ -204,6 +233,7 @@ class IntentEvaluator:
             "per_class":  per_class,
             "total":      len(cases),
             "correct":    correct,
+            "sources":    sources or ["llm", "embedding", "pattern"],
             "cases":      case_details,
         }
 
@@ -249,6 +279,7 @@ class EndToEndEvaluator:
         self,
         intent_cases:    Optional[List[IntentTestCase]] = None,
         dialog_cases:    Optional[List[Dict[str, Any]]] = None,
+        intent_sources:  Optional[List[str]] = None,
     ) -> EvalReport:
         """
         运行完整评测。
@@ -266,7 +297,7 @@ class EndToEndEvaluator:
         # 1. 意图识别评测
         intent_metrics: Dict[str, Any] = {}
         if intent_cases:
-            intent_metrics = await self._intent_evaluator.evaluate(intent_cases)
+            intent_metrics = await self._intent_evaluator.evaluate(intent_cases, sources=intent_sources)
             passed = intent_metrics["accuracy"] >= self.PASS_THRESHOLD
             results.append(EvalResult(
                 test_id="intent_recognition",
@@ -276,6 +307,7 @@ class EndToEndEvaluator:
                 metadata={
                     "total": intent_metrics.get("total", 0),
                     "correct": intent_metrics.get("correct", 0),
+                    "sources": intent_metrics.get("sources", []),
                     "cases": intent_metrics.get("cases", []),
                 },
             ))
@@ -476,21 +508,11 @@ class EndToEndEvaluator:
         )
 
 
-# ── 内置测试用例（开箱即用）──────────────────────────────────────────────────
+# ── 内置 smoke 数据集（独立于 Few-shot 模板，用于快速回归）──────────────────
 
-DEFAULT_INTENT_CASES: List[IntentTestCase] = [
-    IntentTestCase("我的订单什么时候到？",       "logistics"),
-    IntentTestCase("帮我取消订单",               "request"),
-    IntentTestCase("你们服务太差了！",            "complaint"),
-    IntentTestCase("应用一直报500错误",           "technical_crash"),
-    IntentTestCase("为什么扣了两次款？",          "payment_issue"),
-    IntentTestCase("我要投诉，转人工！",          "human_handoff"),
-    IntentTestCase("你好",                        "greeting"),
-    IntentTestCase("修改我的邮箱地址",            "account"),
-    IntentTestCase("帮我开发票",                  "invoice"),
-    IntentTestCase("退款多久到账？",              "refund"),
-    IntentTestCase("登录一直报401",               "technical_login"),
-]
+DEFAULT_INTENT_CASES = load_intent_cases(
+    pathlib.Path(__file__).parent / "datasets" / "intent_smoke_v1.jsonl"
+)
 
 DEFAULT_DIALOG_CASES: List[Dict[str, Any]] = [
     {"question": "我的订单 #12345 还没到，已经超时了"},

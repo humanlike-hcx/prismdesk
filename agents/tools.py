@@ -190,21 +190,28 @@ def build_shared_rag_tools(tool_manager: Any) -> Dict[str, AgentToolSpec]:
             query,
             top_k=top_k,
         )
-        if not getattr(result, "success", False):
+        data = getattr(result, "data", None)
+        fallback_used = bool(getattr(result, "error", None)) or (
+            isinstance(data, list)
+            and any(isinstance(item, dict) and item.get("fallback") for item in data)
+        )
+        if not getattr(result, "success", False) or fallback_used:
             return {
                 "success": False,
                 "query": query,
-                "error": getattr(result, "error", "知识库检索失败"),
+                "error": getattr(result, "error", None) or "知识库检索已降级",
                 "results": [],
                 "reranked": False,
+                "fallback": fallback_used,
             }
 
         return {
             "success": True,
             "query": query,
             "top_k": top_k,
-            "results": result.data,
+            "results": data,
             "reranked": bool(getattr(result, "reranked", False)),
+            "cached": bool(getattr(result, "cached", False)),
         }
 
     return {

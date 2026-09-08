@@ -12,6 +12,17 @@ cp .env.example .env
 
 填写 `ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`；兼容服务另填 `ANTHROPIC_BASE_URL`。设置 `REDIS_PASSWORD` 后启动：
 
+意图识别如需使用远程 Embedding，在 `.env` 中填写 OpenAI 兼容接口配置：
+
+```env
+EMBEDDING_API_KEY=你的密钥
+EMBEDDING_BASE_URL=https://服务商地址/v1
+EMBEDDING_MODEL=服务商提供的模型名
+EMBEDDING_TIMEOUT_S=20
+```
+
+`EMBEDDING_BASE_URL` 填到 `/v1`，程序会请求其 `/embeddings` 端点。未配置这三项时使用本地字符 n-gram 向量。
+
 ```bash
 docker compose up -d --build
 docker compose logs -f prismdesk
@@ -35,3 +46,9 @@ docker compose logs -f prismdesk
 | `tests/` | 自动化测试 |
 
 本地密钥保存在 `.env`，运行数据写入 `data/`、`logs/`，均不纳入版本控制。知识库初始为空，可通过 `/knowledge/add` 或 `/knowledge/upload` 导入业务资料。
+
+`/chat` 会按意图输出 `rag_policy`（`required`、`optional`、`forbidden`），并返回
+`retrieval_attempted`、`retrieval_success` 和 `retrieved_count`。退款、物流、支付、登录故障等业务问题会先检索知识库；寒暄和人工交接不会检索，避免无关知识干扰回答。
+
+意图回归默认读取 `evaluation/datasets/intent_smoke_v1.jsonl`：19 类各 3 条，共 57 条，且不复用 Few-shot 模板。它只作为快速 smoke 集。调用 `/eval/run` 时可传
+`intent_sources: ["embedding"]` 或 `intent_sources: ["llm", "pattern"]` 做消融对比；正式宣称准确率提升前，仍应使用单独保留且规模更大的盲测集。
