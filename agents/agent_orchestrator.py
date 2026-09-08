@@ -4,7 +4,7 @@
 核心问题：多 Agent 情况下如何做 Routing？
 
 路由策略（三层决策）：
-  1. 意图路由 —— 根据 IntentCategory 直接映射到专属 Agent
+  1. 业务路由 —— 根据 general / technical / billing 直接映射到专属 Agent
   2. 性能路由 —— 同类 Agent 有多个时，选成功率最高、延迟最低的
   3. 降级路由 —— 专属 Agent 不可用时，自动降级到 GeneralAgent
 
@@ -38,7 +38,7 @@ from agents.tools import (
     general_tools,
     technical_tools,
 )
-from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
+from core.intent_recognizer import IntentRecognizer, RouteCategory, UrgencyLevel
 from core.llm_utils import extract_text_content
 from core.rag_policy import RAGPolicy
 
@@ -138,10 +138,11 @@ class Request:
     context:     str = ""        # 来自 MemoryManager 的格式化上下文
     history:     Optional[List[Dict[str, str]]] = None  # 对话历史，传给意图识别
     entities:    Dict[str, List[str]] = field(default_factory=dict)
-    intent:      Optional[IntentCategory] = None
-    intent_group: Optional[str] = None
+    route:       Optional[RouteCategory] = None
+    handoff_requested: bool = False
+    needs_clarification: bool = False
     urgency:     Optional[UrgencyLevel]   = None
-    intent_confidence: float = 1.0
+    route_confidence: float = 1.0
     rag_policy: RAGPolicy = RAGPolicy.OPTIONAL
     rag_prefetched: bool = False
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
@@ -152,7 +153,9 @@ class OrchestratorResult:
     request_id:  str
     response:    str
     agent_type:  AgentType
-    intent:      Optional[IntentCategory]
+    route:       Optional[RouteCategory]
+    handoff_requested: bool = False
+    needs_clarification: bool = False
     escalated:   bool  = False
     latency_ms:  float = 0.0
     agent_types: List[AgentType] = field(default_factory=list)
@@ -400,10 +403,11 @@ class BaseAgent:
         """给子 Agent 的确定性输入包；子类可补充领域字段。"""
         packet = {
             "agent_type": self.agent_type.value,
-            "intent": req.intent.value if req.intent else None,
-            "intent_group": req.intent_group,
+            "route": req.route.value if req.route else None,
+            "handoff_requested": req.handoff_requested,
+            "needs_clarification": req.needs_clarification,
             "urgency": req.urgency.name if req.urgency else None,
-            "intent_confidence": round(req.intent_confidence, 4),
+            "route_confidence": round(req.route_confidence, 4),
             "available_entities": req.entities or {},
         }
         return json.dumps(packet, ensure_ascii=False)
@@ -546,12 +550,12 @@ class EscalationAgent(BaseAgent):
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
-        intent = req.intent.value if req.intent else "unknown"
+        route = req.route.value if req.route else "unknown"
         urgency = req.urgency.name if req.urgency else "UNKNOWN"
         entities = json.dumps(req.entities or {}, ensure_ascii=False)
         content = (
             "我已将这个问题标记为人工升级处理。\n\n"
-            f"升级原因：意图={intent}，紧急度={urgency}\n"
+            f"升级原因：业务路由={route}，紧急度={urgency}\n"
             f"已记录信息：{entities}\n"
             "请不要发送密码、短信验证码或完整支付凭证；人工客服会根据会话记录继续核验。"
         )
@@ -632,20 +636,10 @@ class AgentOrchestrator:
       3. 专属 Agent 失败时降级到 GeneralAgent
     """
 
-    # 意图 → Agent 类型的静态映射（路由表）
-    _INTENT_ROUTING: Dict[IntentCategory, AgentType] = {
-        IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
-        IntentCategory.TECHNICAL_LOGIN: AgentType.TECHNICAL,
-        IntentCategory.TECHNICAL_CRASH: AgentType.TECHNICAL,
-        IntentCategory.BILLING:    AgentType.BILLING,
-        IntentCategory.REFUND:     AgentType.BILLING,
-        IntentCategory.INVOICE:    AgentType.BILLING,
-        IntentCategory.PAYMENT_ISSUE: AgentType.BILLING,
-        IntentCategory.ACCOUNT:    AgentType.BILLING,
-        IntentCategory.ACCOUNT_SECURITY: AgentType.BILLING,
-        IntentCategory.ESCALATION: AgentType.ESCALATION,
-        IntentCategory.HUMAN_HANDOFF: AgentType.ESCALATION,
-        # 其余意图 → GENERAL（默认）
+    _ROUTE_ROUTING: Dict[RouteCategory, AgentType] = {
+        RouteCategory.GENERAL: AgentType.GENERAL,
+        RouteCategory.TECHNICAL: AgentType.TECHNICAL,
+        RouteCategory.BILLING: AgentType.BILLING,
     }
 
     def __init__(
@@ -732,7 +726,9 @@ class AgentOrchestrator:
         trace = {
             "request_id": result.request_id,
             "timestamp": datetime.now().isoformat(),
-            "intent": result.intent.value if result.intent else None,
+            "route": result.route.value if result.route else None,
+            "handoff_requested": result.handoff_requested,
+            "needs_clarification": result.needs_clarification,
             "primary_agent": result.primary_agent.value if result.primary_agent else None,
             "supporting_agents": [agent.value for agent in result.supporting_agents],
             "tools_used": list(result.tools_used),
@@ -763,26 +759,29 @@ class AgentOrchestrator:
         """
         t0 = time.monotonic()
 
-        # 1. 意图识别（如果调用方已识别则跳过）
-        if req.intent is None:
-            intent_result = await self._intent_recognizer.recognize(req.message, history=req.history)
-            req.intent  = intent_result.intent
-            req.intent_group = intent_result.intent_group
-            req.urgency = intent_result.urgency
-            req.intent_confidence = intent_result.confidence
+        # 1. 业务路由识别（如果调用方已识别则跳过）
+        if req.route is None:
+            route_result = await self._intent_recognizer.recognize(req.message, history=req.history)
+            req.route = route_result.route
+            req.handoff_requested = route_result.handoff_requested
+            req.needs_clarification = route_result.needs_clarification
+            req.urgency = route_result.urgency
+            req.route_confidence = route_result.confidence
 
         if self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
                 response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
                 agent_type=AgentType.GENERAL,
-                intent=req.intent,
+                route=req.route,
+                handoff_requested=req.handoff_requested,
+                needs_clarification=req.needs_clarification,
                 escalated=False,
                 latency_ms=(time.monotonic() - t0) * 1000,
                 agent_types=[AgentType.GENERAL],
                 primary_agent=AgentType.GENERAL,
-                routing_reason="低置信度 OTHER 意图，先澄清用户需求",
-                routing_confidence=req.intent_confidence,
+                routing_reason="业务路由置信度不足，先澄清用户需求",
+                routing_confidence=req.route_confidence,
             )
             self._record_tool_trace(result)
             return result
@@ -797,10 +796,7 @@ class AgentOrchestrator:
 
         # 4. 升级检查
         escalated = False
-        if response.escalate or req.urgency == UrgencyLevel.CRITICAL or req.intent in (
-            IntentCategory.ESCALATION,
-            IntentCategory.HUMAN_HANDOFF,
-        ):
+        if response.escalate or req.urgency == UrgencyLevel.CRITICAL or req.handoff_requested:
             escalated = True
             logger.warning(f"请求 {req.request_id} 触发升级: urgency={req.urgency}")
             # 生产环境：此处创建工单、通知人工客服
@@ -809,7 +805,9 @@ class AgentOrchestrator:
             request_id=req.request_id,
             response=response.content,
             agent_type=response.agent_type,
-            intent=req.intent,
+            route=req.route,
+            handoff_requested=req.handoff_requested,
+            needs_clarification=req.needs_clarification,
             escalated=escalated,
             latency_ms=(time.monotonic() - t0) * 1000,
             agent_types=[response.agent_type],
@@ -850,7 +848,9 @@ class AgentOrchestrator:
             request_id=req.request_id,
             response=combined,
             agent_type=decision.primary_agent,
-            intent=req.intent,
+            route=req.route,
+            handoff_requested=req.handoff_requested,
+            needs_clarification=req.needs_clarification,
             escalated=escalated,
             latency_ms=(time.monotonic() - t0) * 1000,
             agent_types=[
@@ -869,23 +869,12 @@ class AgentOrchestrator:
 
     # ── 路由逻辑 ──────────────────────────────────────────────────────────────
 
-    def _route(self, intent: Optional[IntentCategory], urgency: Optional[UrgencyLevel]) -> AgentType:
-        """
-        三层路由决策：
-          1. 意图映射
-          2. 紧急度覆盖（CRITICAL 直接升级）
-          3. 默认 GENERAL
-        """
+    def _route(self, route: Optional[RouteCategory], urgency: Optional[UrgencyLevel]) -> AgentType:
+        """根据三路业务域选择 Agent；CRITICAL 保留人工升级覆盖。"""
         if urgency == UrgencyLevel.CRITICAL:
             return AgentType.ESCALATION
-
-        if intent and intent in self._INTENT_ROUTING:
-            target = self._INTENT_ROUTING[intent]
-            # 如果目标类型有可用实例则使用，否则降级
-            if target in self._pool and self._pool[target]:
-                return target
-
-        return AgentType.GENERAL
+        target = self._ROUTE_ROUTING.get(route or RouteCategory.GENERAL, AgentType.GENERAL)
+        return target if self._pool.get(target) else AgentType.GENERAL
 
     def _route_decision(self, req: Request) -> RoutingDecision:
         """
@@ -901,101 +890,33 @@ class AgentOrchestrator:
                 confidence=1.0,
             )
 
-        if req.intent in (IntentCategory.ESCALATION, IntentCategory.HUMAN_HANDOFF):
+        if req.handoff_requested:
             return RoutingDecision(
                 primary_agent=AgentType.ESCALATION,
-                reason=f"意图为 {req.intent.value if req.intent else 'unknown'}，触发升级路由",
-                confidence=max(req.intent_confidence, 0.8),
+                reason="用户明确请求人工处理，触发升级路由",
+                confidence=max(req.route_confidence, 0.8),
             )
 
-        scores = self._domain_scores(req)
-        available_scores = {
-            agent_type: score
-            for agent_type, score in scores.items()
-            if agent_type == AgentType.GENERAL or self._pool.get(agent_type)
-        }
-        if not available_scores:
-            return RoutingDecision(
-                primary_agent=AgentType.GENERAL,
-                reason="无可用专属 Agent，降级到 GeneralAgent",
-                confidence=0.1,
-            )
-
-        ordered = sorted(available_scores.items(), key=lambda item: item[1], reverse=True)
-        primary_agent, primary_score = ordered[0]
+        primary_agent = self._route(req.route, None)
         supporting_agents = [
-            agent_type
-            for agent_type, score in ordered[1:]
-            if agent_type != AgentType.GENERAL and score >= 0.45 and score >= primary_score * 0.55
+            agent_type for agent_type in self._collaboration_targets(req)
+            if agent_type != primary_agent
         ]
-
-        reason = self._routing_reason(req, available_scores, primary_agent, supporting_agents)
+        scores = {
+            AgentType.GENERAL: 0.0,
+            AgentType.TECHNICAL: 0.0,
+            AgentType.BILLING: 0.0,
+        }
+        scores[primary_agent] = 1.0
+        for agent_type in supporting_agents:
+            scores[agent_type] = 0.5
+        reason = self._routing_reason(req, scores, primary_agent, supporting_agents)
         return RoutingDecision(
             primary_agent=primary_agent,
             supporting_agents=supporting_agents,
             reason=reason,
-            confidence=round(min(primary_score, 1.0), 3),
+            confidence=round(max(req.route_confidence, 0.5), 3),
         )
-
-    def _domain_scores(self, req: Request) -> Dict[AgentType, float]:
-        """按意图、关键词和实体为各领域 Agent 打分。"""
-        msg = req.message.lower()
-        scores = {
-            AgentType.GENERAL: 0.1,
-            AgentType.TECHNICAL: 0.0,
-            AgentType.BILLING: 0.0,
-        }
-
-        if req.intent in (
-            IntentCategory.QUERY,
-            IntentCategory.ORDER_STATUS,
-            IntentCategory.LOGISTICS,
-            IntentCategory.REQUEST,
-            IntentCategory.COMPLAINT,
-            IntentCategory.GREETING,
-            IntentCategory.FEEDBACK,
-            IntentCategory.OTHER,
-        ):
-            scores[AgentType.GENERAL] += 0.55
-
-        if req.intent in (
-            IntentCategory.TECHNICAL,
-            IntentCategory.TECHNICAL_LOGIN,
-            IntentCategory.TECHNICAL_CRASH,
-        ):
-            scores[AgentType.TECHNICAL] += 0.75
-
-        if req.intent in (
-            IntentCategory.BILLING,
-            IntentCategory.ACCOUNT,
-            IntentCategory.ACCOUNT_SECURITY,
-            IntentCategory.REFUND,
-            IntentCategory.INVOICE,
-            IntentCategory.PAYMENT_ISSUE,
-        ):
-            scores[AgentType.BILLING] += 0.75
-
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "验证码"]
-        billing_kws = ["退款", "退货", "扣款", "发票", "账单", "支付", "订阅", "refund", "invoice", "多扣"]
-        general_kws = ["订单", "物流", "快递", "配送", "会员", "积分", "咨询", "帮助"]
-
-        technical_hits = sum(1 for kw in technical_kws if kw in msg)
-        billing_hits = sum(1 for kw in billing_kws if kw in msg)
-        general_hits = sum(1 for kw in general_kws if kw in msg)
-
-        scores[AgentType.TECHNICAL] += min(0.45, technical_hits * 0.18)
-        scores[AgentType.BILLING] += min(0.45, billing_hits * 0.18)
-        scores[AgentType.GENERAL] += min(0.35, general_hits * 0.12)
-
-        entities = req.entities or {}
-        if entities.get("error_code"):
-            scores[AgentType.TECHNICAL] += 0.2
-        if entities.get("amount"):
-            scores[AgentType.BILLING] += 0.15
-        if entities.get("order_id"):
-            scores[AgentType.GENERAL] += 0.1
-
-        return {agent_type: round(score, 3) for agent_type, score in scores.items()}
 
     @staticmethod
     def _routing_reason(
@@ -1009,9 +930,9 @@ class AgentOrchestrator:
             for agent_type, score in sorted(scores.items(), key=lambda item: item[1], reverse=True)
         )
         support_text = ", ".join(agent.value for agent in supporting_agents) or "none"
-        intent = req.intent.value if req.intent else "unknown"
+        route = req.route.value if req.route else "unknown"
         return (
-            f"intent={intent}, group={req.intent_group or 'unknown'}, "
+            f"route={route}, handoff_requested={req.handoff_requested}, "
             f"primary={primary_agent.value}, supporting={support_text}, scores=[{score_text}]"
         )
 
@@ -1028,20 +949,9 @@ class AgentOrchestrator:
         technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401"]
         billing_kws = ["退款", "扣款", "发票", "账单", "支付", "订阅", "refund", "invoice"]
 
-        if req.intent in (
-            IntentCategory.TECHNICAL,
-            IntentCategory.TECHNICAL_LOGIN,
-            IntentCategory.TECHNICAL_CRASH,
-        ) or any(kw in msg for kw in technical_kws):
+        if req.route == RouteCategory.TECHNICAL or any(kw in msg for kw in technical_kws):
             targets.append(AgentType.TECHNICAL)
-        if req.intent in (
-            IntentCategory.BILLING,
-            IntentCategory.ACCOUNT,
-            IntentCategory.ACCOUNT_SECURITY,
-            IntentCategory.REFUND,
-            IntentCategory.INVOICE,
-            IntentCategory.PAYMENT_ISSUE,
-        ) or any(kw in msg for kw in billing_kws):
+        if req.route == RouteCategory.BILLING or any(kw in msg for kw in billing_kws):
             targets.append(AgentType.BILLING)
 
         # 保持顺序去重，并只返回当前有实例的 Agent 类型。
@@ -1050,13 +960,8 @@ class AgentOrchestrator:
 
     @staticmethod
     def _needs_clarification(req: Request) -> bool:
-        """低置信度且无明确意图时，先追问，避免误路由。"""
-        if req.intent != IntentCategory.OTHER:
-            return False
-        text = (req.message or "").strip()
-        if len(text) <= 2:
-            return False
-        return req.intent_confidence < 0.5
+        """由识别层的独立澄清决策控制，避免用不存在的 OTHER 路由兜底。"""
+        return req.needs_clarification
 
     def _best_agent(self, agent_type: AgentType) -> Optional[BaseAgent]:
         """

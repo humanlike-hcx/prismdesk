@@ -2,6 +2,7 @@ import asyncio
 
 from agents.agent_orchestrator import (
     AgentProfile,
+    AgentOrchestrator,
     AgentResponse,
     AgentType,
     BillingAgent,
@@ -13,7 +14,7 @@ from agents.agent_orchestrator import (
     TechnicalAgent,
     build_shared_rag_tools,
 )
-from core.intent_recognizer import IntentCategory, UrgencyLevel
+from core.intent_recognizer import RouteCategory, UrgencyLevel
 from core.rag_policy import RAGPolicy
 
 
@@ -38,10 +39,9 @@ def make_request(**kwargs):
         "message": "登录时报 401，同时这笔订单被重复扣款",
         "user_id": "u1",
         "conv_id": "c1",
-        "intent": IntentCategory.TECHNICAL_LOGIN,
-        "intent_group": "technical",
+        "route": RouteCategory.TECHNICAL,
         "urgency": UrgencyLevel.HIGH,
-        "intent_confidence": 0.92,
+        "route_confidence": 0.92,
         "entities": {"error_code": ["401"], "amount": ["99 元"]},
     }
     values.update(kwargs)
@@ -75,7 +75,8 @@ def test_escalation_agent_is_a_real_non_llm_handoff_node():
     agent = EscalationAgent(client, "test-model")
 
     result = asyncio.run(agent.handle(make_request(
-        intent=IntentCategory.HUMAN_HANDOFF,
+        route=RouteCategory.BILLING,
+        handoff_requested=True,
         urgency=UrgencyLevel.CRITICAL,
     )))
 
@@ -109,6 +110,26 @@ def test_routing_decision_can_target_escalation_pool():
     )
     assert decision.agent_types == [AgentType.ESCALATION]
     assert not decision.multi_agent
+
+
+def test_three_routes_map_directly_and_handoff_overrides_business_route():
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._pool = {
+        AgentType.GENERAL: [object()],
+        AgentType.TECHNICAL: [object()],
+        AgentType.BILLING: [object()],
+        AgentType.ESCALATION: [object()],
+    }
+
+    assert orchestrator._route(RouteCategory.GENERAL, None) == AgentType.GENERAL
+    assert orchestrator._route(RouteCategory.TECHNICAL, None) == AgentType.TECHNICAL
+    assert orchestrator._route(RouteCategory.BILLING, None) == AgentType.BILLING
+
+    handoff = orchestrator._route_decision(make_request(
+        route=RouteCategory.BILLING,
+        handoff_requested=True,
+    ))
+    assert handoff.primary_agent == AgentType.ESCALATION
 
 
 def test_agent_tool_scopes_are_real_and_isolated():
@@ -215,7 +236,7 @@ def test_forbidden_rag_policy_hides_knowledge_tool_from_model():
 
     response = asyncio.run(agent.handle(make_request(
         message="你好",
-        intent=IntentCategory.GREETING,
+        route=RouteCategory.GENERAL,
         rag_policy=RAGPolicy.FORBIDDEN,
     )))
 
@@ -234,7 +255,7 @@ def test_prefetched_rag_is_not_requested_twice():
 
     response = asyncio.run(agent.handle(make_request(
         message="退款多久到账",
-        intent=IntentCategory.REFUND,
+        route=RouteCategory.BILLING,
         rag_policy=RAGPolicy.REQUIRED,
         rag_prefetched=True,
     )))

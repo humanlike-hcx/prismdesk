@@ -1,7 +1,4 @@
-"""RAG 调用策略。
-
-策略由意图识别结果决定，避免把“是否检索”完全交给生成模型临场判断。
-"""
+"""独立于业务路由的 RAG 调用策略。"""
 from enum import Enum
 from typing import Any
 
@@ -12,38 +9,27 @@ class RAGPolicy(str, Enum):
     FORBIDDEN = "forbidden"
 
 
-_REQUIRED_INTENTS = {
-    "query",
-    "technical",
-    "billing",
-    "complaint",
-    "order_status",
-    "logistics",
-    "refund",
-    "invoice",
-    "payment_issue",
-    "account_security",
-    "technical_login",
-    "technical_crash",
-}
-_FORBIDDEN_INTENTS = {"greeting", "feedback", "escalation", "human_handoff"}
-_BUSINESS_KEYWORDS = {
-    "退款", "退货", "订单", "物流", "配送", "发票", "扣款", "支付", "账单",
-    "订阅", "登录", "报错", "错误", "崩溃", "会员", "积分", "账户", "密码",
-    "地址", "refund", "order", "invoice", "payment", "error", "login",
-}
+_SOCIAL_PATTERNS = ("你好", "您好", "嗨", "hello", "hi", "谢谢", "感谢")
 
 
-def decide_rag_policy(message: str, intent: Any = None) -> RAGPolicy:
-    """根据细粒度意图和业务关键词返回稳定、可测试的检索策略。"""
+def decide_rag_policy(
+    message: str,
+    route: Any = None,
+    *,
+    handoff_requested: bool = False,
+) -> RAGPolicy:
+    """根据业务域和会话动作决定是否在生成前检索知识库。
+
+    技术和账单回复依赖产品规则、故障说明或售后政策，因此预取知识；人工
+    交接不检索，避免把额外答案混入交接流程。通用域由 Agent 按上下文选择。
+    """
     text = (message or "").strip().lower()
-    intent_value = getattr(intent, "value", intent)
-    if intent_value in {"escalation", "human_handoff"}:
+    route_value = getattr(route, "value", route)
+    if handoff_requested:
         return RAGPolicy.FORBIDDEN
-    if intent_value in _REQUIRED_INTENTS:
+    if route_value in {"technical", "billing"}:
         return RAGPolicy.REQUIRED
-    if any(keyword in text for keyword in _BUSINESS_KEYWORDS):
-        return RAGPolicy.REQUIRED
-    if intent_value in _FORBIDDEN_INTENTS:
+    normalized = text.strip(" !！。,.？?")
+    if len(normalized) <= 12 and any(pattern in normalized for pattern in _SOCIAL_PATTERNS):
         return RAGPolicy.FORBIDDEN
     return RAGPolicy.OPTIONAL

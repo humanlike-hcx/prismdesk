@@ -1,13 +1,8 @@
-"""
-亮点：端到端意图识别
+"""三路业务路由识别。
 
-三路融合策略：
-  1. LLM 语义理解（权重 70%）—— 主力，理解复杂语义和上下文
-  2. Embedding 向量相似度（权重 20%）—— 快速匹配常见表达
-  3. 关键词模式匹配（权重 10%）—— 零延迟兜底
-
-三路结果通过加权投票合并，置信度低于阈值时降级为 OTHER。
-LLM 和 Embedding 并行调用，不串行等待。
+识别器只回答一个入口问题：这条消息应该由通用、技术还是账单流程处理。
+转人工和需要澄清是可组合的决策字段，避免把业务领域、会话动作和具体
+业务任务放进同一个互斥标签集合。
 """
 import asyncio
 import hashlib
@@ -19,132 +14,88 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from anthropic import AsyncAnthropic
 import httpx
+from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
 logger = logging.getLogger(__name__)
 
 
-class IntentCategory(Enum):
-    QUERY      = "query"       # 查询信息
-    COMPLAINT  = "complaint"   # 投诉不满
-    REQUEST    = "request"     # 请求操作
-    GREETING   = "greeting"    # 问候
-    ESCALATION = "escalation"  # 要求升级/转人工
-    TECHNICAL  = "technical"   # 技术问题
-    BILLING    = "billing"     # 账单/退款
-    ACCOUNT    = "account"     # 账户管理
-    FEEDBACK   = "feedback"    # 正面反馈
-    ORDER_STATUS = "order_status"        # 订单状态
-    LOGISTICS = "logistics"              # 物流配送
-    REFUND = "refund"                    # 退款/退货
-    INVOICE = "invoice"                  # 发票
-    PAYMENT_ISSUE = "payment_issue"      # 支付/扣款异常
-    ACCOUNT_SECURITY = "account_security" # 账户安全
-    TECHNICAL_LOGIN = "technical_login"  # 登录认证故障
-    TECHNICAL_CRASH = "technical_crash"  # 崩溃/错误码
-    HUMAN_HANDOFF = "human_handoff"      # 转人工
-    OTHER      = "other"
+class RouteCategory(str, Enum):
+    """入口业务路由；细节由对应 Agent 结合消息和实体继续处理。"""
+
+    GENERAL = "general"
+    TECHNICAL = "technical"
+    BILLING = "billing"
 
 
 class UrgencyLevel(Enum):
-    LOW      = 1
-    MEDIUM   = 2
-    HIGH     = 3
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
     CRITICAL = 4
 
 
 @dataclass
 class IntentResult:
-    intent:     IntentCategory
+    """路由结果。保留类名以避免调用方把识别层与 HTTP 术语耦合。"""
+
+    route: RouteCategory
     confidence: float
-    urgency:    UrgencyLevel
-    intent_group: str
-    entities:   Dict[str, List[str]]   # 从消息中提取的实体
-    reasoning:  str
+    urgency: UrgencyLevel
+    handoff_requested: bool
+    needs_clarification: bool
+    entities: Dict[str, List[str]]
+    reasoning: str
     latency_ms: float
     source_scores: Dict[str, float] = field(default_factory=dict)
 
 
-# ── Few-shot 模板（同时用于 LLM 示例和 Embedding 匹配）────────────────────────
-_TEMPLATES: Dict[IntentCategory, List[str]] = {
-    IntentCategory.QUERY:      ["我的订单状态是什么？", "如何重置密码？", "快递什么时候到？"],
-    IntentCategory.COMPLAINT:  ["等了好几个小时！", "服务太差了！", "一直没人处理！"],
-    IntentCategory.REQUEST:    ["帮我取消订单", "我需要修改地址", "请协助退款"],
-    IntentCategory.GREETING:   ["你好", "嗨，有人吗", "早上好"],
-    IntentCategory.ESCALATION: ["我要投诉！", "转人工客服", "找你们经理"],
-    IntentCategory.TECHNICAL:  ["应用一直崩溃", "无法登录", "出现500错误"],
-    IntentCategory.BILLING:    ["为什么扣了两次款？", "申请退款", "发票问题"],
-    IntentCategory.ACCOUNT:    ["修改邮箱", "注销账户", "更新个人信息"],
-    IntentCategory.FEEDBACK:   ["服务很棒！", "非常满意", "给个好评"],
-    IntentCategory.ORDER_STATUS: ["我的订单现在是什么状态？", "订单有没有发货？", "订单处理到哪一步了？"],
-    IntentCategory.LOGISTICS: ["快递什么时候到？", "物流一直不更新", "配送要多久？"],
-    IntentCategory.REFUND: ["我要申请退款", "退货退款怎么处理？", "退款多久到账？"],
-    IntentCategory.INVOICE: ["帮我开发票", "发票抬头怎么改？", "电子发票在哪里？"],
-    IntentCategory.PAYMENT_ISSUE: ["为什么重复扣款？", "支付失败怎么办？", "这个月多扣了钱"],
-    IntentCategory.ACCOUNT_SECURITY: ["账户被盗了", "发现异常登录", "我要重置密码"],
-    IntentCategory.TECHNICAL_LOGIN: ["登录一直报401", "验证码收不到", "无法登录账号"],
-    IntentCategory.TECHNICAL_CRASH: ["应用一直崩溃", "页面报500错误", "系统闪退"],
-    IntentCategory.HUMAN_HANDOFF: ["转人工客服", "我要找人工", "请升级处理"],
+# 模板的职责是描述三个 Agent 的稳定责任边界，而不是细分业务任务。
+_TEMPLATES: Dict[RouteCategory, List[str]] = {
+    RouteCategory.GENERAL: [
+        "我的订单现在到哪一步了？",
+        "快递一直没有更新怎么办？",
+        "怎样修改账户邮箱？",
+        "你们周末提供在线服务吗？",
+    ],
+    RouteCategory.TECHNICAL: [
+        "应用启动后一直闪退",
+        "登录时提示 401 错误",
+        "页面显示 500，无法继续操作",
+        "验证码一直收不到",
+    ],
+    RouteCategory.BILLING: [
+        "为什么这笔订单被重复扣款？",
+        "退款通常什么时候到账？",
+        "电子发票在哪里下载？",
+        "订阅扣费金额不对",
+    ],
 }
 
-_SPECIFIC_INTENTS = {
-    IntentCategory.ORDER_STATUS,
-    IntentCategory.LOGISTICS,
-    IntentCategory.REFUND,
-    IntentCategory.INVOICE,
-    IntentCategory.PAYMENT_ISSUE,
-    IntentCategory.ACCOUNT_SECURITY,
-    IntentCategory.TECHNICAL_LOGIN,
-    IntentCategory.TECHNICAL_CRASH,
-    IntentCategory.HUMAN_HANDOFF,
-}
-
-_GENERIC_INTENTS = {
-    IntentCategory.QUERY,
-    IntentCategory.BILLING,
-    IntentCategory.TECHNICAL,
-    IntentCategory.ACCOUNT,
-    IntentCategory.ESCALATION,
-}
-
-_INTENT_GROUPS: Dict[IntentCategory, IntentCategory] = {
-    IntentCategory.ORDER_STATUS: IntentCategory.QUERY,
-    IntentCategory.LOGISTICS: IntentCategory.QUERY,
-    IntentCategory.REFUND: IntentCategory.BILLING,
-    IntentCategory.INVOICE: IntentCategory.BILLING,
-    IntentCategory.PAYMENT_ISSUE: IntentCategory.BILLING,
-    IntentCategory.ACCOUNT_SECURITY: IntentCategory.ACCOUNT,
-    IntentCategory.TECHNICAL_LOGIN: IntentCategory.TECHNICAL,
-    IntentCategory.TECHNICAL_CRASH: IntentCategory.TECHNICAL,
-    IntentCategory.HUMAN_HANDOFF: IntentCategory.ESCALATION,
-}
-
-# 紧急关键词
+_HANDOFF_PATTERNS = (
+    "转人工", "人工客服", "人工坐席", "找人工", "真人客服", "人工处理",
+)
+_SOCIAL_PATTERNS = ("你好", "您好", "嗨", "hello", "hi", "在吗", "谢谢", "感谢")
+_COMPLAINT_PATTERNS = ("太差", "糟糕", "不满意", "一直没人", "等了很久", "投诉")
 _URGENCY_KEYWORDS = {
-    UrgencyLevel.CRITICAL: ["紧急", "emergency", "urgent", "asap", "立刻"],
-    UrgencyLevel.HIGH:     ["今天", "马上", "尽快", "hurry", "now"],
-    UrgencyLevel.MEDIUM:   ["这周", "soon", "快点"],
+    UrgencyLevel.CRITICAL: ("紧急", "emergency", "urgent", "asap", "立刻"),
+    UrgencyLevel.HIGH: ("今天", "马上", "尽快", "hurry", "now"),
+    UrgencyLevel.MEDIUM: ("这周", "soon", "快点"),
 }
 
 
 def _cosine(a: List[float], b: List[float]) -> float:
     """纯 Python 余弦相似度，不依赖 numpy。"""
     dot = sum(x * y for x, y in zip(a, b))
-    na  = sum(x * x for x in a) ** 0.5
-    nb  = sum(x * x for x in b) ** 0.5
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
 
 
 class IntentRecognizer:
-    """
-    端到端意图识别器。
-
-    初始化时不加载任何本地模型，所有 AI 能力通过 Anthropic API 调用。
-    模板 Embedding 在首次请求时懒加载并缓存，后续复用。
-    """
+    """使用 LLM、Embedding 和模式规则融合决定三路业务路由。"""
 
     def __init__(
         self,
@@ -160,8 +111,8 @@ class IntentRecognizer:
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
-        self.client    = AsyncAnthropic(**kwargs)
-        self.model     = model
+        self.client = AsyncAnthropic(**kwargs)
+        self.model = model
         self.threshold = confidence_threshold
         self._embedding_api_key = (embedding_api_key or "").strip()
         self._embedding_base_url = (embedding_base_url or "").strip().rstrip("/")
@@ -175,16 +126,11 @@ class IntentRecognizer:
         self._remote_embedding_enabled = bool(
             self._embedding_api_key and self._embedding_base_url and self._embedding_model
         )
-        # 未配置远端服务时使用本地字符 n-gram 向量。
-        # 已配置远端服务后，调用失败会让该路识别失败，避免混用不同维度的向量。
         self._embedding_enabled = True
-
-        self._tpl_embeddings: Dict[IntentCategory, List[List[float]]] = {}
+        self._tpl_embeddings: Dict[RouteCategory, List[List[float]]] = {}
         self._cache: Dict[str, IntentResult] = {}
-        self.cache_hits   = 0
+        self.cache_hits = 0
         self.cache_misses = 0
-
-    # ── 公开接口 ──────────────────────────────────────────────────────────────
 
     async def recognize(
         self,
@@ -192,237 +138,157 @@ class IntentRecognizer:
         history: Optional[List[Dict[str, str]]] = None,
         sources: Optional[List[str]] = None,
     ) -> IntentResult:
-        """
-        识别用户意图。
-
-        history 格式：[{"role": "user"/"assistant", "content": "..."}]
-        """
         active_sources = set(sources or ["llm", "embedding", "pattern"])
         invalid_sources = active_sources - {"llm", "embedding", "pattern"}
         if not active_sources or invalid_sources:
-            raise ValueError(f"无效的意图识别来源: {sorted(invalid_sources) or '空列表'}")
+            raise ValueError(f"无效的路由识别来源: {sorted(invalid_sources) or '空列表'}")
 
         key = self._cache_key(message, history, active_sources)
         if key in self._cache:
             self.cache_hits += 1
             return self._cache[key]
         self.cache_misses += 1
-
         t0 = time.monotonic()
 
-        # LLM 和 Embedding 并行（Embedding 不可用时跳过）
         llm_task = asyncio.create_task(self._llm_recognize(message, history)) if "llm" in active_sources else None
-        emb_task = (
-            asyncio.create_task(self._embedding_recognize(message))
-            if "embedding" in active_sources and self._embedding_enabled else None
-        )
-        pat = self._pattern_recognize(message) if "pattern" in active_sources else {
-            "intent": IntentCategory.OTHER, "confidence": 0.0
-        }
+        emb_task = asyncio.create_task(self._embedding_recognize(message)) if "embedding" in active_sources else None
+        pattern = self._pattern_recognize(message) if "pattern" in active_sources else self._empty_result()
         pending = [task for task in (llm_task, emb_task) if task is not None]
         if pending:
             await asyncio.gather(*pending)
-        llm = llm_task.result() if llm_task else {
-            "intent": IntentCategory.OTHER, "confidence": 0.0, "failed": True
-        }
-        emb = emb_task.result() if emb_task else {"intent": IntentCategory.OTHER, "confidence": 0.0}
+        llm = llm_task.result() if llm_task else self._empty_result(failed=True)
+        embedding = emb_task.result() if emb_task else self._empty_result()
 
-        intent, confidence, source_scores = self._vote(llm, emb, pat, active_sources)
-        entities = self._extract_entities(message)
-        urgency  = self._urgency(message, intent)
-
+        route, confidence, source_scores = self._vote(llm, embedding, pattern, active_sources)
+        normalized = self._clean_text(message)
+        handoff_requested = self._handoff_requested(normalized)
         result = IntentResult(
-            intent=intent,
+            route=route,
             confidence=confidence,
-            urgency=urgency,
-            intent_group=self._intent_group(intent),
-            entities=entities,
-            reasoning=llm.get("reasoning", ""),
+            urgency=self._urgency(normalized, handoff_requested),
+            handoff_requested=handoff_requested,
+            needs_clarification=(confidence < self.threshold and not self._is_social_message(normalized)),
+            entities=self._extract_entities(normalized),
+            reasoning=str(llm.get("reasoning", "")),
             latency_ms=(time.monotonic() - t0) * 1000,
             source_scores=source_scores,
         )
-
-        # LRU 缓存
         if len(self._cache) >= 1000:
-            for k in list(self._cache)[:500]:
-                del self._cache[k]
+            for old_key in list(self._cache)[:500]:
+                del self._cache[old_key]
         self._cache[key] = result
         return result
 
-    def learn(self, message: str, correct: IntentCategory) -> None:
-        """在线学习：将纠正样本加入模板，清除对应 Embedding 缓存。"""
-        tpls = _TEMPLATES.setdefault(correct, [])
-        if message not in tpls:
-            tpls.append(message)
-            self._tpl_embeddings.pop(correct, None)  # 下次重新计算
-            self._cache.clear()  # 模板更新后旧缓存可能对应过时结果
-            logger.info(f"学习新样本 → {correct.value}: {message[:40]}")
-
-    # ── 三路识别策略 ──────────────────────────────────────────────────────────
+    def learn(self, message: str, correct: RouteCategory) -> None:
+        """将人工确认的路由样本加入对应模板，并清除派生缓存。"""
+        templates = _TEMPLATES.setdefault(correct, [])
+        if message not in templates:
+            templates.append(message)
+            self._tpl_embeddings.pop(correct, None)
+            self._cache.clear()
+            logger.info("学习新路由样本 → %s", correct.value)
 
     async def _llm_recognize(
-        self,
-        message: str,
-        history: Optional[List[Dict[str, str]]],
+        self, message: str, history: Optional[List[Dict[str, str]]]
     ) -> Dict[str, Any]:
-        """策略 1：LLM 语义理解（Few-shot + 上下文）。"""
-        message = self._clean_text(message)
-        # 构建 Few-shot 示例
         examples = "\n".join(
-            f'  消息: "{t}" → 意图: {cat.value}'
-            for cat, tpls in _TEMPLATES.items()
-            for t in tpls[:1]  # 每类取 1 条，控制 prompt 长度
+            f'  消息: "{templates[0]}" → 路由: {route.value}'
+            for route, templates in _TEMPLATES.items()
         )
-        # 最近 3 轮对话上下文
-        ctx = ""
+        context = ""
         if history:
-            ctx = "\n最近对话:\n" + "\n".join(
-                f"  {self._clean_text(m.get('role', 'user'))}: {self._clean_text(m.get('content', ''))}"
-                for m in history[-3:]
+            context = "\n最近对话:\n" + "\n".join(
+                f"  {self._clean_text(item.get('role', 'user'))}: {self._clean_text(item.get('content', ''))}"
+                for item in history[-3:]
             )
-
-        prompt = f"""你是客服意图分析专家。根据示例判断用户意图，返回 JSON。
-如果用户问题能匹配细粒度业务意图，请优先返回细粒度意图，而不是宽泛大类。
-例如退款优先返回 refund，发票优先返回 invoice，登录故障优先返回 technical_login。
+        prompt = self._clean_text(f'''你是客服入口路由器。只判断用户问题应交由哪个业务 Agent 处理。
+路由定义：general 处理订单、物流、账户、常规咨询、投诉与反馈；technical 处理登录、报错、崩溃、功能异常和配置问题；billing 处理扣款、支付、退款、发票和订阅金额问题。
+“转人工”等会话动作由系统独立处理，不能作为路由类别。不要把退款、发票、登录故障等再拆成细粒度标签。
 
 示例:
 {examples}
-{ctx}
-用户消息: "{message}"
+{context}
+用户消息: "{self._clean_text(message)}"
 
-返回格式（仅 JSON，不要其他文字）:
-{{"intent": "<意图值>", "confidence": <0-1>, "reasoning": "<一句话说明>"}}
-
-可选意图: {", ".join(c.value for c in IntentCategory)}"""
-        prompt = self._clean_text(prompt)
-
+只返回 JSON：{{"route":"general|technical|billing", "confidence":0到1, "reasoning":"一句话"}}''')
         try:
-            resp = await self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=256,
+                max_tokens=192,
                 temperature=0.1,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw = extract_text_content(resp.content)
-            s, e = raw.find("{"), raw.rfind("}") + 1
-            data = json.loads(raw[s:e])
-            try:
-                data["intent"] = IntentCategory(data["intent"])
-            except ValueError:
-                data["intent"] = IntentCategory.OTHER
+            raw = extract_text_content(response.content)
+            start, end = raw.find("{"), raw.rfind("}") + 1
+            data = json.loads(raw[start:end])
+            data["route"] = RouteCategory(str(data.get("route", "general")))
+            data["confidence"] = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
             return data
         except Exception as ex:
-            logger.warning(f"LLM 识别失败: {ex}")
-            return {"intent": IntentCategory.OTHER, "confidence": 0.0, "reasoning": "LLM 失败", "failed": True}
+            logger.warning("LLM 路由识别失败: %s", ex)
+            return self._empty_result(reasoning="LLM 失败", failed=True)
 
     async def _embedding_recognize(self, message: str) -> Dict[str, Any]:
-        """策略 2：Embedding 向量相似度匹配。"""
         try:
             await self._load_template_embeddings()
-            msg_vec = await self._embed_text(message)
-
-            best_cat, best_score = IntentCategory.OTHER, 0.0
-            for cat, vecs in self._tpl_embeddings.items():
-                score = max(_cosine(msg_vec, v) for v in vecs)
+            message_vector = await self._embed_text(message)
+            best_route, best_score = RouteCategory.GENERAL, 0.0
+            for route, vectors in self._tpl_embeddings.items():
+                score = max(_cosine(message_vector, vector) for vector in vectors)
                 if score > best_score:
-                    best_score, best_cat = score, cat
-
-            return {"intent": best_cat, "confidence": best_score}
+                    best_route, best_score = route, score
+            return {"route": best_route, "confidence": best_score}
         except Exception as ex:
-            logger.warning(f"Embedding 识别失败: {ex}")
-            return {"intent": IntentCategory.OTHER, "confidence": 0.0}
+            logger.warning("Embedding 路由识别失败: %s", ex)
+            return self._empty_result()
 
     def _pattern_recognize(self, message: str) -> Dict[str, Any]:
-        """策略 3：关键词模式匹配（同步，零延迟兜底）。"""
-        msg = message.lower()
-        specific_patterns = {
-            IntentCategory.HUMAN_HANDOFF: ["转人工", "人工客服", "找人工"],
-            IntentCategory.ORDER_STATUS: ["订单状态", "发货了吗", "处理到哪", "order status"],
-            IntentCategory.LOGISTICS: ["物流", "快递", "配送", "运单", "delivery", "shipping"],
-            IntentCategory.REFUND: ["退款", "退货", "refund", "return"],
-            IntentCategory.INVOICE: ["发票", "抬头", "税号", "invoice"],
-            IntentCategory.PAYMENT_ISSUE: ["重复扣款", "多扣", "支付失败", "扣费", "payment failed"],
-            IntentCategory.ACCOUNT_SECURITY: ["被盗", "异常登录", "重置密码", "两步验证", "安全"],
-            IntentCategory.TECHNICAL_LOGIN: ["无法登录", "登录失败", "401", "验证码"],
-            IntentCategory.TECHNICAL_CRASH: ["崩溃", "闪退", "500", "报错", "crash"],
+        patterns = {
+            RouteCategory.BILLING: (
+                "退款", "退货", "重复扣款", "多扣", "扣费", "支付失败", "支付", "发票", "税号", "订阅", "invoice", "refund",
+            ),
+            RouteCategory.TECHNICAL: (
+                "无法登录", "登录失败", "验证码", "崩溃", "闪退", "报错", "错误码", "页面打不开", "异常", "配置", "error", "crash",
+            ),
+            RouteCategory.GENERAL: (
+                "订单", "物流", "快递", "配送", "账户", "邮箱", "服务", "投诉", "怎么", "什么", "你好", "hello",
+            ),
         }
-        generic_patterns = {
-            IntentCategory.ESCALATION: ["投诉", "经理", "supervisor"],
-            IntentCategory.COMPLAINT:  ["太差", "糟糕", "horrible", "等了很久"],
-            IntentCategory.QUERY:      ["?", "？", "怎么", "什么", "status"],
-            IntentCategory.REQUEST:    ["帮我", "需要", "please", "help"],
-            IntentCategory.GREETING:   ["你好", "嗨", "hello", "hi"],
-            IntentCategory.BILLING:    ["退款", "扣款", "发票", "refund"],
-            IntentCategory.TECHNICAL:  ["崩溃", "报错", "error", "crash"],
-            IntentCategory.ACCOUNT:    ["密码", "邮箱", "账户", "password"],
-        }
-
-        best_cat, best_score = self._best_pattern_match(msg, specific_patterns)
-        if best_cat != IntentCategory.OTHER:
-            return {"intent": best_cat, "confidence": best_score}
-
-        best_cat, best_score = self._best_pattern_match(msg, generic_patterns)
-        return {"intent": best_cat, "confidence": best_score}
-
-    # ── 投票合并 ──────────────────────────────────────────────────────────────
+        route, score = self._best_pattern_match(message.lower(), patterns)
+        return {"route": route, "confidence": score}
 
     def _vote(
         self,
-        llm: Dict,
-        emb: Dict,
-        pat: Dict,
-        active_sources: Optional[set[str]] = None,
-    ) -> tuple[IntentCategory, float, Dict[str, float]]:
-        """加权投票。返回最终意图、融合置信度和各路来源得分。"""
+        llm: Dict[str, Any],
+        embedding: Dict[str, Any],
+        pattern: Dict[str, Any],
+        active_sources: set[str],
+    ) -> tuple[RouteCategory, float, Dict[str, float]]:
         source_scores = {
             "llm": float(llm.get("confidence", 0.0) or 0.0),
-            "embedding": float(emb.get("confidence", 0.0) or 0.0),
-            "pattern": float(pat.get("confidence", 0.0) or 0.0),
+            "embedding": float(embedding.get("confidence", 0.0) or 0.0),
+            "pattern": float(pattern.get("confidence", 0.0) or 0.0),
         }
-        active_sources = active_sources or {"llm", "embedding", "pattern"}
         if "llm" in active_sources and llm.get("failed"):
-            if emb.get("intent") != IntentCategory.OTHER and emb.get("confidence", 0.0) > 0:
-                return emb["intent"], source_scores["embedding"], source_scores
-            if pat.get("intent") != IntentCategory.OTHER and pat.get("confidence", 0.0) > 0:
-                return pat["intent"], source_scores["pattern"], source_scores
-            return IntentCategory.OTHER, 0.0, source_scores
+            for source, result in (("embedding", embedding), ("pattern", pattern)):
+                if source in active_sources and result.get("confidence", 0.0) > 0:
+                    return result["route"], source_scores[source], source_scores
+            return RouteCategory.GENERAL, 0.0, source_scores
 
-        named_results = {"llm": llm, "embedding": emb, "pattern": pat}
         base_weights = {"llm": 0.7, "embedding": 0.2, "pattern": 0.1}
-        enabled_weight = sum(base_weights[name] for name in active_sources)
-        weights = [
-            (named_results[name], base_weights[name] / enabled_weight)
-            for name in ("llm", "embedding", "pattern")
-            if name in active_sources
-        ]
-        scores: Dict[IntentCategory, float] = {}
-        for result, w in weights:
-            cat  = result.get("intent", IntentCategory.OTHER)
-            conf = result.get("confidence", 0.0)
-            scores[cat] = scores.get(cat, 0.0) + w * conf
-
-        best = max(scores, key=scores.get)  # type: ignore
-        best_score = scores[best]
-        pat_intent = pat.get("intent", IntentCategory.OTHER)
-        pat_conf = float(pat.get("confidence", 0.0) or 0.0)
-        if (
-            "pattern" in active_sources
-            and best in _GENERIC_INTENTS
-            and pat_intent in _SPECIFIC_INTENTS
-            and pat_conf >= 0.5
-            and best_score < 0.8
-        ):
-            source_scores["refined_by_pattern"] = pat_conf
-            return pat_intent, max(best_score, pat_conf), source_scores
-        if best_score < self.threshold:
-            return IntentCategory.OTHER, best_score, source_scores
-        return best, best_score, source_scores
-
-    # ── 实体提取 ──────────────────────────────────────────────────────────────
+        total_weight = sum(base_weights[source] for source in active_sources)
+        scores: Dict[RouteCategory, float] = {}
+        for source, result in (("llm", llm), ("embedding", embedding), ("pattern", pattern)):
+            if source not in active_sources:
+                continue
+            route = result.get("route", RouteCategory.GENERAL)
+            scores[route] = scores.get(route, 0.0) + (base_weights[source] / total_weight) * float(result.get("confidence", 0.0) or 0.0)
+        if not scores:
+            return RouteCategory.GENERAL, 0.0, source_scores
+        route = max(scores, key=scores.get)
+        return route, scores[route], source_scores
 
     def _extract_entities(self, message: str) -> Dict[str, List[str]]:
-        """用规则提取高价值实体，避免每次识别都额外调用 LLM。"""
-        message = self._clean_text(message)
         return {
             "order_id": self._unique(re.findall(r"(?:订单号?|order(?:_id)?|#)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
             "product": [],
@@ -434,143 +300,106 @@ class IntentRecognizer:
             ),
         }
 
-    # ── 辅助 ──────────────────────────────────────────────────────────────────
-
     async def _load_template_embeddings(self) -> None:
-        """懒加载所有模板的 Embedding（只在首次调用时执行）。"""
-        missing = [cat for cat in _TEMPLATES if cat not in self._tpl_embeddings]
+        missing = [route for route in _TEMPLATES if route not in self._tpl_embeddings]
         if not missing:
             return
-
-        all_texts = [t for cat in missing for t in _TEMPLATES[cat]]
-        vecs = await self._embed_texts(all_texts)
-        idx = 0
-        for cat in missing:
-            n = len(_TEMPLATES[cat])
-            self._tpl_embeddings[cat] = vecs[idx: idx + n]
-            idx += n
+        texts = [text for route in missing for text in _TEMPLATES[route]]
+        vectors = await self._embed_texts(texts)
+        index = 0
+        for route in missing:
+            count = len(_TEMPLATES[route])
+            self._tpl_embeddings[route] = vectors[index:index + count]
+            index += count
 
     async def _embed_text(self, text: str) -> List[float]:
-        """生成单条文本向量。"""
         return (await self._embed_texts([text]))[0]
 
     async def _embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """通过 OpenAI 兼容接口批量生成向量，模板初始化只发起一次请求。"""
         if self._remote_embedding_enabled:
             try:
-                headers = {
-                    "Authorization": f"Bearer {self._embedding_api_key}",
-                    "Content-Type": "application/json",
-                }
-                payload = {"model": self._embedding_model, "input": texts}
+                headers = {"Authorization": f"Bearer {self._embedding_api_key}", "Content-Type": "application/json"}
                 async with httpx.AsyncClient(timeout=self._embedding_timeout_s) as client:
                     response = await client.post(
                         self._embedding_endpoint,
                         headers=headers,
-                        json=payload,
+                        json={"model": self._embedding_model, "input": texts},
                     )
                     response.raise_for_status()
                     data = response.json().get("data", [])
-                ordered = sorted(data, key=lambda item: int(item.get("index", 0)))
-                vectors = [list(item["embedding"]) for item in ordered]
+                vectors = [list(item["embedding"]) for item in sorted(data, key=lambda item: int(item.get("index", 0)))]
                 if len(vectors) != len(texts) or any(not vector for vector in vectors):
                     raise ValueError("Embedding 返回的向量数量或内容不正确")
                 return vectors
             except Exception as ex:
                 raise RuntimeError(f"远端 Embedding 调用失败: {ex}") from ex
-
         return [self._local_embedding(text) for text in texts]
 
     @staticmethod
     def _local_embedding(text: str, dims: int = 256) -> List[float]:
-        """稳定的字符 n-gram 哈希向量，用于无远端 Embedding 时的语义近似匹配。"""
         normalized = text.lower().strip()
-        vec = [0.0] * dims
-        tokens = set()
-        for n in (1, 2, 3):
-            if len(normalized) >= n:
-                tokens.update(normalized[i:i + n] for i in range(len(normalized) - n + 1))
+        vector = [0.0] * dims
+        tokens = {normalized[index:index + size] for size in (1, 2, 3) for index in range(max(0, len(normalized) - size + 1))}
         if not tokens:
-            tokens.add(normalized)
-
+            tokens = {normalized}
         for token in tokens:
             digest = hashlib.md5(token.encode("utf-8")).digest()
-            idx = int.from_bytes(digest[:4], "big") % dims
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vec[idx] += sign
-        return vec
+            vector[int.from_bytes(digest[:4], "big") % dims] += 1.0 if digest[4] % 2 == 0 else -1.0
+        return vector
 
-    def _urgency(self, message: str, intent: IntentCategory) -> UrgencyLevel:
-        msg = message.lower()
-        for level, kws in _URGENCY_KEYWORDS.items():
-            if any(kw in msg for kw in kws):
+    @staticmethod
+    def _empty_result(reasoning: str = "", failed: bool = False) -> Dict[str, Any]:
+        return {"route": RouteCategory.GENERAL, "confidence": 0.0, "reasoning": reasoning, "failed": failed}
+
+    @staticmethod
+    def _handoff_requested(message: str) -> bool:
+        lowered = message.lower()
+        return any(pattern in lowered for pattern in _HANDOFF_PATTERNS)
+
+    @staticmethod
+    def _is_social_message(message: str) -> bool:
+        normalized = message.lower().strip(" !！。,.？?")
+        return len(normalized) <= 12 and any(pattern in normalized for pattern in _SOCIAL_PATTERNS)
+
+    def _urgency(self, message: str, handoff_requested: bool) -> UrgencyLevel:
+        lowered = message.lower()
+        for level, keywords in _URGENCY_KEYWORDS.items():
+            if any(keyword in lowered for keyword in keywords):
                 return level
-        if intent in (IntentCategory.ESCALATION, IntentCategory.HUMAN_HANDOFF):
+        if handoff_requested:
             return UrgencyLevel.HIGH
-        if intent == IntentCategory.COMPLAINT:
+        if any(pattern in lowered for pattern in _COMPLAINT_PATTERNS):
             return UrgencyLevel.MEDIUM
         return UrgencyLevel.LOW
 
-    def _cache_key(
-        self,
-        message: str,
-        history: Optional[List[Dict[str, str]]] = None,
-        sources: Optional[set[str]] = None,
-    ) -> str:
-        payload = {
-            "message": self._clean_text(message)[:200],
-            "sources": sorted(sources or {"llm", "embedding", "pattern"}),
-        }
+    def _cache_key(self, message: str, history: Optional[List[Dict[str, str]]] = None, sources: Optional[set[str]] = None) -> str:
+        payload: Dict[str, Any] = {"message": self._clean_text(message)[:200], "sources": sorted(sources or {"llm", "embedding", "pattern"})}
         if history:
-            payload["history"] = [
-                {
-                    "role": self._clean_text(item.get("role", ""))[:20],
-                    "content": self._clean_text(item.get("content", ""))[:160],
-                }
-                for item in history[-3:]
-            ]
-        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+            payload["history"] = [{"role": self._clean_text(item.get("role", ""))[:20], "content": self._clean_text(item.get("content", ""))[:160]} for item in history[-3:]]
+        return hashlib.md5(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _best_pattern_match(message: str, patterns: Dict[RouteCategory, tuple[str, ...]]) -> tuple[RouteCategory, float]:
+        best_route, best_score = RouteCategory.GENERAL, 0.0
+        for route, keywords in patterns.items():
+            hits = sum(keyword in message for keyword in keywords)
+            if hits:
+                score = min(1.0, 0.5 + 0.25 * (hits - 1))
+                if score > best_score:
+                    best_route, best_score = route, score
+        return best_route, best_score
 
     @staticmethod
     def _unique(values: List[str]) -> List[str]:
         return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
 
     @staticmethod
-    def _best_pattern_match(
-        message: str,
-        patterns: Dict[IntentCategory, List[str]],
-    ) -> tuple[IntentCategory, float]:
-        best_cat, best_score = IntentCategory.OTHER, 0.0
-        for cat, kws in patterns.items():
-            hits = sum(1 for kw in kws if kw in message)
-            if not hits:
-                continue
-            # 单个明确业务关键词就给可用置信度；多个关键词命中时提高置信度。
-            score = min(1.0, 0.5 + 0.25 * (hits - 1))
-            if score > best_score:
-                best_score, best_cat = score, cat
-        return best_cat, best_score
-
-    @staticmethod
-    def _intent_group(intent: IntentCategory) -> str:
-        return _INTENT_GROUPS.get(intent, intent).value
-
-    @staticmethod
     def _clean_text(value: Any) -> str:
-        """移除 Unicode 代理字符，避免 HTTP 客户端编码 prompt 时崩溃。"""
         if value is None:
             return ""
-        if not isinstance(value, str):
-            value = str(value)
-        return value.encode("utf-8", errors="ignore").decode("utf-8")
+        return str(value).encode("utf-8", errors="ignore").decode("utf-8")
 
     @property
     def cache_stats(self) -> Dict[str, Any]:
         total = self.cache_hits + self.cache_misses
-        return {
-            "size": len(self._cache),
-            "hits": self.cache_hits,
-            "misses": self.cache_misses,
-            "hit_rate": self.cache_hits / total if total else 0.0,
-        }
+        return {"size": len(self._cache), "hits": self.cache_hits, "misses": self.cache_misses, "hit_rate": self.cache_hits / total if total else 0.0}

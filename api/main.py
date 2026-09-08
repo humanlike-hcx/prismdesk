@@ -232,8 +232,9 @@ class ChatResponse(BaseModel):
     conv_id:     str
     request_id:  str = ""
     response:    str
-    intent:      str
-    intent_group: str = "other"
+    route:       str
+    handoff_requested: bool = False
+    needs_clarification: bool = False
     agent_type:  str
     agent_types: List[str] = Field(default_factory=list)
     primary_agent: str = ""
@@ -249,8 +250,8 @@ class ChatResponse(BaseModel):
     retrieval_success: bool = False
     retrieved_count: int = 0
     entities: Dict[str, List[str]] = Field(default_factory=dict)
-    intent_confidence: float = 0.0
-    intent_source_scores: Dict[str, float] = Field(default_factory=dict)
+    route_confidence: float = 0.0
+    route_source_scores: Dict[str, float] = Field(default_factory=dict)
 
 
 class ToolTraceResponse(BaseModel):
@@ -317,7 +318,11 @@ async def chat(req: ChatRequest):
     full_context = mem_ctx.to_prompt_text()
     from core.rag_policy import RAGPolicy, decide_rag_policy
 
-    rag_policy = decide_rag_policy(req.message, intent_result.intent)
+    rag_policy = decide_rag_policy(
+        req.message,
+        intent_result.route,
+        handoff_requested=intent_result.handoff_requested,
+    )
     retrieval = KnowledgeContextResult()
     if rag_policy == RAGPolicy.REQUIRED:
         retrieval = await _build_knowledge_context(req.message, top_k=3)
@@ -331,10 +336,11 @@ async def chat(req: ChatRequest):
         context=full_context,
         history=history,
         entities=intent_result.entities,
-        intent=intent_result.intent,
-        intent_group=intent_result.intent_group,
+        route=intent_result.route,
+        handoff_requested=intent_result.handoff_requested,
+        needs_clarification=intent_result.needs_clarification,
         urgency=intent_result.urgency,
-        intent_confidence=intent_result.confidence,
+        route_confidence=intent_result.confidence,
         rag_policy=rag_policy,
         rag_prefetched=retrieval.success,
     )
@@ -362,8 +368,9 @@ async def chat(req: ChatRequest):
         conv_id=conv_id,
         request_id=result.request_id,
         response=result.response,
-        intent=result.intent.value if result.intent else "other",
-        intent_group=intent_result.intent_group,
+        route=result.route.value if result.route else "general",
+        handoff_requested=intent_result.handoff_requested,
+        needs_clarification=intent_result.needs_clarification,
         agent_type=result.agent_type.value,
         agent_types=[agent_type.value for agent_type in result.agent_types],
         primary_agent=result.primary_agent.value if result.primary_agent else result.agent_type.value,
@@ -382,8 +389,8 @@ async def chat(req: ChatRequest):
             default=0,
         ),
         entities=intent_result.entities,
-        intent_confidence=round(intent_result.confidence, 4),
-        intent_source_scores=intent_result.source_scores,
+        route_confidence=round(intent_result.confidence, 4),
+        route_source_scores=intent_result.source_scores,
     )
 
 
@@ -500,10 +507,10 @@ class BatchDocInput(BaseModel):
     documents: List[DocInput]
 
 
-class EvalIntentInput(BaseModel):
-    """意图识别评测用例。"""
+class EvalRouteInput(BaseModel):
+    """三路业务路由评测用例。"""
     message: str
-    expected_intent: str
+    expected_route: str
     context: Optional[Dict[str, Any]] = None
 
 
@@ -517,9 +524,9 @@ class EvalDialogInput(BaseModel):
 
 class EvalRunInput(BaseModel):
     """评测请求。为空时使用内置默认用例。"""
-    intent_cases: Optional[List[EvalIntentInput]] = None
+    route_cases: Optional[List[EvalRouteInput]] = None
     dialog_cases: Optional[List[EvalDialogInput]] = None
-    intent_sources: Optional[List[str]] = None
+    route_sources: Optional[List[str]] = None
 
 
 @app.post("/knowledge/add", tags=["知识库"])
@@ -608,19 +615,19 @@ async def run_eval(body: Optional[EvalRunInput] = None):
     """运行内置评测用例，返回评测报告。"""
     if _evaluator is None:
         raise HTTPException(503, "服务未就绪")
-    from evaluation.evaluator import DEFAULT_DIALOG_CASES, DEFAULT_INTENT_CASES, IntentTestCase
+    from evaluation.evaluator import DEFAULT_DIALOG_CASES, DEFAULT_ROUTE_CASES, RouteTestCase
 
-    if body and body.intent_cases is not None:
-        intent_cases = [
-            IntentTestCase(
+    if body and body.route_cases is not None:
+        route_cases = [
+            RouteTestCase(
                 message=c.message,
-                expected_intent=c.expected_intent,
+                expected_route=c.expected_route,
                 context=c.context,
             )
-            for c in body.intent_cases
+            for c in body.route_cases
         ]
     else:
-        intent_cases = DEFAULT_INTENT_CASES
+        route_cases = DEFAULT_ROUTE_CASES
 
     if body and body.dialog_cases is not None:
         dialog_cases = [
@@ -631,9 +638,9 @@ async def run_eval(body: Optional[EvalRunInput] = None):
         dialog_cases = DEFAULT_DIALOG_CASES
 
     report = await _evaluator.run(
-        intent_cases=intent_cases,
+        route_cases=route_cases,
         dialog_cases=dialog_cases,
-        intent_sources=body.intent_sources if body else None,
+        route_sources=body.route_sources if body else None,
     )
     return {
         "pass_rate":       report.pass_rate,

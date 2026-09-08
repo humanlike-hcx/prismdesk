@@ -47,8 +47,8 @@ docker compose logs -f prismdesk
 
 本地密钥保存在 `.env`，运行数据写入 `data/`、`logs/`，均不纳入版本控制。知识库初始为空，可通过 `/knowledge/add` 或 `/knowledge/upload` 导入业务资料。
 
-`/chat` 会按意图输出 `rag_policy`（`required`、`optional`、`forbidden`），并返回
-`retrieval_attempted`、`retrieval_success` 和 `retrieved_count`。退款、物流、支付、登录故障等业务问题会先检索知识库；寒暄和人工交接不会检索，避免无关知识干扰回答。
+`/chat` 返回三路业务 `route`（`general`、`technical`、`billing`）以及独立的
+`handoff_requested`、`needs_clarification` 和 `rag_policy`（`required`、`optional`、`forbidden`）。技术与账单问题会先检索知识库；明确人工交接和简单寒暄不会检索，避免无关知识干扰交接或问候。
 
-意图回归默认读取 `evaluation/datasets/intent_smoke_v1.jsonl`：19 类各 3 条，共 57 条，且不复用 Few-shot 模板。它只作为快速 smoke 集。调用 `/eval/run` 时可传
-`intent_sources: ["embedding"]` 或 `intent_sources: ["llm", "pattern"]` 做消融对比；正式宣称准确率提升前，仍应使用单独保留且规模更大的盲测集。
+路由回归默认读取 `evaluation/datasets/route_dev_v1.jsonl`：三类各 8 条，且不复用 Few-shot 模板。它只用于开发排错。调用 `/eval/run` 时可传
+`route_cases`，并用 `route_sources: ["embedding"]` 或 `route_sources: ["llm", "pattern"]` 做三路融合消融；正式宣称准确率前，仍应使用独立保留且规模更大的盲测集。

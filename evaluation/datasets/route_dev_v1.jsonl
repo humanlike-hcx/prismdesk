@@ -1,0 +1,24 @@
+{"id":"general-01","message":"订单已经三天没有状态变化了","expected_route":"general"}
+{"id":"general-02","message":"配送地址写错了，怎么修改","expected_route":"general"}
+{"id":"general-03","message":"可以查看服务使用说明吗","expected_route":"general"}
+{"id":"general-04","message":"账号绑定的邮箱需要换一个","expected_route":"general"}
+{"id":"general-05","message":"客服回复太慢，我想反馈这个问题","expected_route":"general"}
+{"id":"general-06","message":"包裹显示已签收但我没有拿到","expected_route":"general"}
+{"id":"general-07","message":"会员权益具体包含哪些内容","expected_route":"general"}
+{"id":"general-08","message":"请问在线服务在节假日是否开放","expected_route":"general"}
+{"id":"technical-01","message":"客户端打开后立刻退出，没有任何提示","expected_route":"technical"}
+{"id":"technical-02","message":"登录页面一直提示身份验证失败","expected_route":"technical"}
+{"id":"technical-03","message":"上传文件时页面报 HTTP 500","expected_route":"technical"}
+{"id":"technical-04","message":"手机收不到登录验证码","expected_route":"technical"}
+{"id":"technical-05","message":"更新版本以后功能按钮全部点不动","expected_route":"technical"}
+{"id":"technical-06","message":"接口返回 403，我该检查什么","expected_route":"technical"}
+{"id":"technical-07","message":"应用频繁闪退，安卓系统","expected_route":"technical"}
+{"id":"technical-08","message":"网络正常但后台页面始终无法加载","expected_route":"technical"}
+{"id":"billing-01","message":"同一笔消费好像扣了两次钱","expected_route":"billing"}
+{"id":"billing-02","message":"我申请的退货款一直没有收到","expected_route":"billing"}
+{"id":"billing-03","message":"公司报销需要电子票据，从哪里开","expected_route":"billing"}
+{"id":"billing-04","message":"本月自动续费的金额和页面展示不一致","expected_route":"billing"}
+{"id":"billing-05","message":"付款失败但银行卡已经有扣款记录","expected_route":"billing"}
+{"id":"billing-06","message":"想取消下个月的订阅扣费","expected_route":"billing"}
+{"id":"billing-07","message":"退款进度可以帮我确认吗","expected_route":"billing"}
+{"id":"billing-08","message":"发票抬头填错后还能重开吗","expected_route":"billing"}

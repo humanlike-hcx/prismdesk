@@ -27,7 +27,7 @@ from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
-from core.intent_recognizer import IntentCategory, IntentRecognizer
+from core.intent_recognizer import IntentRecognizer, RouteCategory
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +35,17 @@ logger = logging.getLogger(__name__)
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
 
 @dataclass
-class IntentTestCase:
+class RouteTestCase:
     message:          str
-    expected_intent:  str
+    expected_route:   str
     context:          Optional[Dict[str, Any]] = None
     test_id:          str = ""
 
 
-def load_intent_cases(path: pathlib.Path) -> List[IntentTestCase]:
-    """读取版本化 JSONL，并在运行评测前校验标签和重复样本。"""
-    valid_labels = {intent.value for intent in IntentCategory}
-    cases: List[IntentTestCase] = []
+def load_route_cases(path: pathlib.Path) -> List[RouteTestCase]:
+    """读取版本化 JSONL，并在运行评测前校验三路由标签和重复样本。"""
+    valid_labels = {route.value for route in RouteCategory}
+    cases: List[RouteTestCase] = []
     seen_ids = set()
     seen_messages = set()
     for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -54,14 +54,14 @@ def load_intent_cases(path: pathlib.Path) -> List[IntentTestCase]:
         data = json.loads(raw)
         test_id = str(data.get("id", "")).strip()
         message = str(data.get("message", "")).strip()
-        expected = str(data.get("expected_intent", "")).strip()
+        expected = str(data.get("expected_route", "")).strip()
         if not test_id or not message or expected not in valid_labels:
-            raise ValueError(f"{path}:{line_no} 包含无效的 id、message 或意图标签")
+            raise ValueError(f"{path}:{line_no} 包含无效的 id、message 或路由标签")
         if test_id in seen_ids or message in seen_messages:
             raise ValueError(f"{path}:{line_no} 包含重复 id 或消息")
         seen_ids.add(test_id)
         seen_messages.add(message)
-        cases.append(IntentTestCase(message, expected, test_id=test_id))
+        cases.append(RouteTestCase(message, expected, test_id=test_id))
     return cases
 
 
@@ -181,15 +181,15 @@ Agent 响应: {response}
 
 # ── 意图识别评测 ──────────────────────────────────────────────────────────────
 
-class IntentEvaluator:
-    """评测意图识别的准确率和 F1。"""
+class RouteEvaluator:
+    """评测三路业务路由的准确率和 F1。"""
 
     def __init__(self, recognizer: IntentRecognizer):
         self._recognizer = recognizer
 
     async def evaluate(
         self,
-        cases: List[IntentTestCase],
+        cases: List[RouteTestCase],
         sources: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         predictions, ground_truth = [], []
@@ -197,13 +197,13 @@ class IntentEvaluator:
 
         for case in cases:
             result = await self._recognizer.recognize(case.message, sources=sources)
-            predicted = result.intent.value
+            predicted = result.route.value
             predictions.append(predicted)
-            ground_truth.append(case.expected_intent)
+            ground_truth.append(case.expected_route)
             case_details.append({
                 "test_id": case.test_id,
                 "message": case.message,
-                "expected": case.expected_intent,
+                "expected": case.expected_route,
                 "predicted": predicted,
                 "confidence": result.confidence,
                 "reasoning": result.reasoning,
@@ -270,21 +270,21 @@ class EndToEndEvaluator:
 
         self._orchestrator     = orchestrator
         self._judge            = LLMJudge(client, model)
-        self._intent_evaluator = IntentEvaluator(recognizer)
+        self._route_evaluator = RouteEvaluator(recognizer)
         self._history:         List[EvalReport] = []
         self._baseline_path = pathlib.Path(baseline_path) if baseline_path else None
         self._baseline: Optional[EvalReport] = self._load_baseline()
 
     async def run(
         self,
-        intent_cases:    Optional[List[IntentTestCase]] = None,
+        route_cases:     Optional[List[RouteTestCase]] = None,
         dialog_cases:    Optional[List[Dict[str, Any]]] = None,
-        intent_sources:  Optional[List[str]] = None,
+        route_sources:   Optional[List[str]] = None,
     ) -> EvalReport:
         """
         运行完整评测。
 
-        intent_cases: 意图识别测试用例
+        route_cases: 三路业务路由测试用例
         dialog_cases:
           - 单轮: [{"question": "..."}]
           - 多轮: [{"turns": ["第一轮", "第二轮", ...]}]
@@ -294,21 +294,21 @@ class EndToEndEvaluator:
             "relevance": [], "accuracy": [], "completeness": [], "helpfulness": []
         }
 
-        # 1. 意图识别评测
-        intent_metrics: Dict[str, Any] = {}
-        if intent_cases:
-            intent_metrics = await self._intent_evaluator.evaluate(intent_cases, sources=intent_sources)
-            passed = intent_metrics["accuracy"] >= self.PASS_THRESHOLD
+        # 1. 业务路由评测
+        route_metrics: Dict[str, Any] = {}
+        if route_cases:
+            route_metrics = await self._route_evaluator.evaluate(route_cases, sources=route_sources)
+            passed = route_metrics["accuracy"] >= self.PASS_THRESHOLD
             results.append(EvalResult(
-                test_id="intent_recognition",
+                test_id="route_recognition",
                 passed=passed,
-                scores={"accuracy": intent_metrics["accuracy"], "macro_f1": intent_metrics["macro_f1"]},
-                detail=f"准确率 {intent_metrics['accuracy']:.1%}，Macro-F1 {intent_metrics['macro_f1']:.3f}",
+                scores={"accuracy": route_metrics["accuracy"], "macro_f1": route_metrics["macro_f1"]},
+                detail=f"准确率 {route_metrics['accuracy']:.1%}，Macro-F1 {route_metrics['macro_f1']:.3f}",
                 metadata={
-                    "total": intent_metrics.get("total", 0),
-                    "correct": intent_metrics.get("correct", 0),
-                    "sources": intent_metrics.get("sources", []),
-                    "cases": intent_metrics.get("cases", []),
+                    "total": route_metrics.get("total", 0),
+                    "correct": route_metrics.get("correct", 0),
+                    "sources": route_metrics.get("sources", []),
+                    "cases": route_metrics.get("cases", []),
                 },
             ))
 
@@ -326,8 +326,8 @@ class EndToEndEvaluator:
         avg_scores = {
             k: round(statistics.mean(v), 4) for k, v in all_scores.items() if v
         }
-        if intent_metrics:
-            avg_scores["intent_accuracy"] = intent_metrics["accuracy"]
+        if route_metrics:
+            avg_scores["route_accuracy"] = route_metrics["accuracy"]
 
         passed_count = sum(1 for r in results if r.passed)
         pass_rate    = passed_count / len(results) if results else 0.0
@@ -336,7 +336,7 @@ class EndToEndEvaluator:
         regressions = self._detect_regressions(avg_scores)
 
         # 5. 优化建议
-        recommendations = self._recommendations(avg_scores, intent_metrics)
+        recommendations = self._recommendations(avg_scores, route_metrics)
 
         report = EvalReport(
             timestamp=datetime.now().isoformat(),
@@ -399,7 +399,7 @@ class EndToEndEvaluator:
                     "question": question,
                     "response": actual_answer,
                     "agent_type": orch_result.agent_type.value,
-                    "intent": orch_result.intent.value if orch_result.intent else None,
+                    "route": orch_result.route.value if orch_result.route else None,
                     "turn": turn_idx,
                     "conv_id": conv_id,
                     "judge_failed": scores.judge_failed,
@@ -443,11 +443,11 @@ class EndToEndEvaluator:
     def _recommendations(
         self,
         scores: Dict[str, float],
-        intent_metrics: Dict[str, Any],
+        route_metrics: Dict[str, Any],
     ) -> List[str]:
         recs = []
-        if scores.get("intent_accuracy", 1.0) < 0.90:
-            recs.append("意图识别准确率 < 90%：增加 Few-shot 示例，或对低 F1 的意图类别补充训练数据")
+        if scores.get("route_accuracy", 1.0) < 0.90:
+            recs.append("业务路由准确率 < 90%：检查路由边界和独立验证集中的混淆样本")
         if scores.get("relevance", 1.0) < 0.75:
             recs.append("相关性偏低：检查 Agent system_prompt，确保 Agent 聚焦于用户问题")
         if scores.get("completeness", 1.0) < 0.75:
@@ -510,8 +510,8 @@ class EndToEndEvaluator:
 
 # ── 内置 smoke 数据集（独立于 Few-shot 模板，用于快速回归）──────────────────
 
-DEFAULT_INTENT_CASES = load_intent_cases(
-    pathlib.Path(__file__).parent / "datasets" / "intent_smoke_v1.jsonl"
+DEFAULT_ROUTE_CASES = load_route_cases(
+    pathlib.Path(__file__).parent / "datasets" / "route_dev_v1.jsonl"
 )
 
 DEFAULT_DIALOG_CASES: List[Dict[str, Any]] = [

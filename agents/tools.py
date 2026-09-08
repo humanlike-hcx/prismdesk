@@ -62,10 +62,11 @@ def make_tool(
 def inspect_request_context(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """通用客服工具：返回脱敏后的当前请求快照。"""
     return {
-        "intent": req.intent.value if req.intent else None,
-        "intent_group": req.intent_group,
+        "route": req.route.value if req.route else None,
+        "handoff_requested": req.handoff_requested,
+        "needs_clarification": req.needs_clarification,
         "urgency": req.urgency.name if req.urgency else None,
-        "intent_confidence": round(req.intent_confidence, 4),
+        "route_confidence": round(req.route_confidence, 4),
         "entities": req.entities or {},
         "context_available": bool(req.context),
         "requested_focus": str(args.get("focus", "general"))[:40],
@@ -74,18 +75,18 @@ def inspect_request_context(req: Request, args: Dict[str, Any]) -> Dict[str, Any
 
 def suggest_required_fields(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """通用客服工具：按业务类型计算下一轮只需询问的字段。"""
-    intent = req.intent.value if req.intent else "other"
+    route = req.route.value if req.route else "general"
     fields: List[str] = []
-    if intent in {"order_status", "logistics"}:
-        fields = ["订单号或下单时间"]
-    elif intent in {"account", "account_security"}:
-        fields = ["登录方式或账号标识", "问题发生时间"]
-    elif intent in {"complaint", "request"}:
-        fields = ["事件时间", "期望处理方式"]
-    elif intent == "other":
+    if route == "billing":
+        fields = ["订单号或交易号", "支付金额与时间"]
+    elif route == "technical":
+        fields = ["问题发生时间", "设备或运行环境", "完整错误信息"]
+    elif req.entities.get("order_id"):
+        fields = ["订单号已记录，请补充希望查询或处理的事项"]
+    elif req.needs_clarification:
         fields = ["希望解决的具体问题"]
     return {
-        "intent": intent,
+        "route": route,
         "required_fields": fields,
         "known_entities": req.entities or {},
     }
@@ -167,7 +168,7 @@ def create_handoff_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any]
     return {
         "request_id": req.request_id,
         "reason": str(args.get("reason", "需要人工客服继续核验"))[:120],
-        "intent": req.intent.value if req.intent else "unknown",
+        "route": req.route.value if req.route else "unknown",
         "urgency": req.urgency.name if req.urgency else "UNKNOWN",
         "entities": req.entities or {},
         "sensitive_data_required": False,
