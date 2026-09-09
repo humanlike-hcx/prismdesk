@@ -285,7 +285,8 @@ class IntentRecognizer:
                 return embedding["route"], source_scores["embedding"], source_scores["embedding"], source_scores
             return RouteCategory.GENERAL, 0.0, 0.0, source_scores
 
-        base_weights = {"llm": 0.5, "embedding": 0.5}
+        # LLM 承担语义主判，Embedding 用于提供独立的相似度信号和故障兜底。
+        base_weights = {"llm": 0.7, "embedding": 0.3}
         total_weight = sum(base_weights[source] for source in active_sources)
         scores: Dict[RouteCategory, float] = {}
         for source, result in (("llm", llm), ("embedding", embedding)):
@@ -298,7 +299,7 @@ class IntentRecognizer:
         ranked_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         route, confidence = ranked_scores[0]
         score_margin = confidence - (ranked_scores[1][1] if len(ranked_scores) > 1 else 0.0)
-        return route, confidence, round(score_margin, 4), source_scores
+        return route, round(confidence, 4), round(score_margin, 4), source_scores
 
     def _extract_entities(self, message: str) -> Dict[str, List[str]]:
         return {

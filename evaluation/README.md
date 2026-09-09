@@ -22,4 +22,4 @@ Pattern 不参与业务路由投票，只负责显式人工交接、紧急度和
 python -m evaluation.route_ablation --suite validation --output evaluation/results/route_validation_live.json
 ```
 
-评测脚本会分别报告 LLM、Embedding 与 LLM 权重为 0.25、0.5、0.75 的融合结果。仅依据 validation 选择参数；完成后再运行 `--suite blind`，结果文件被 Git 忽略。
+评测脚本会分别报告 LLM、Embedding 与 LLM 权重为 0.25、0.5、0.7、0.75 的融合结果。生产默认权重为 0.7（LLM）与 0.3（Embedding）。仅依据 validation 选择参数；完成后再运行 `--suite blind`，结果文件被 Git 忽略。

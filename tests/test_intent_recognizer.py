@@ -117,6 +117,6 @@ def test_two_source_vote_reports_margin_for_clarification_decision():
     )
 
     assert route == RouteCategory.TECHNICAL
-    assert confidence == 0.4
-    assert margin == 0.02
+    assert confidence == 0.56
+    assert margin == 0.332
     assert source_scores == {"llm": 0.8, "embedding": 0.76}

@@ -120,7 +120,7 @@ async def main() -> None:
         "embedding": _summary(rows, -1, args.clarification_margin),
         "fusion_llm_weight": {
             str(weight): _summary(rows, weight, args.clarification_margin)
-            for weight in (0.25, 0.5, 0.75)
+            for weight in (0.25, 0.5, 0.7, 0.75)
         },
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
