@@ -29,6 +29,9 @@ Thumbs.db
 # 测试缓存
 .pytest_cache/
 
+# 本地模型评测产物（数据集与评测脚本单独版本化）
+evaluation/results/*.json
+
 # ChromaDB 本地数据
 *.sqlite3
 

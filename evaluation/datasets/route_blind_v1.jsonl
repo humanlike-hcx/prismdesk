@@ -1,0 +1,36 @@
+{"id":"blind-general-01","message":"包裹送到自提点后能保留几天","expected_route":"general"}
+{"id":"blind-general-02","message":"我想把默认收货地址删除","expected_route":"general"}
+{"id":"blind-general-03","message":"订单里的商品数量少了一件","expected_route":"general"}
+{"id":"blind-general-04","message":"如何申请成为企业客户","expected_route":"general"}
+{"id":"blind-general-05","message":"客服承诺的回电一直没有收到","expected_route":"general"}
+{"id":"blind-general-06","message":"可以把配送时间改到周末吗","expected_route":"general"}
+{"id":"blind-general-07","message":"我的账号昵称在哪里修改","expected_route":"general"}
+{"id":"blind-general-08","message":"订单状态里的处理中是什么意思","expected_route":"general"}
+{"id":"blind-general-09","message":"平台能否提供纸质使用手册","expected_route":"general"}
+{"id":"blind-general-10","message":"想了解退换货的寄送地址","expected_route":"general"}
+{"id":"blind-general-11","message":"服务体验不好，应该从哪里提交建议","expected_route":"general"}
+{"id":"blind-general-12","message":"我不想再接收活动邮件","expected_route":"general"}
+{"id":"blind-technical-01","message":"安卓手机打开应用后白屏不显示内容","expected_route":"technical"}
+{"id":"blind-technical-02","message":"重置密码链接打开后提示页面不存在","expected_route":"technical"}
+{"id":"blind-technical-03","message":"浏览器控制台报跨域错误","expected_route":"technical"}
+{"id":"blind-technical-04","message":"扫描二维码后相机页面卡死","expected_route":"technical"}
+{"id":"blind-technical-05","message":"接口签名校验一直失败","expected_route":"technical"}
+{"id":"blind-technical-06","message":"输入手机号后登录按钮没有反应","expected_route":"technical"}
+{"id":"blind-technical-07","message":"桌面端一启动就占满 CPU 然后退出","expected_route":"technical"}
+{"id":"blind-technical-08","message":"导出报表时系统报 504","expected_route":"technical"}
+{"id":"blind-technical-09","message":"打开通知中心总是提示加载组件失败","expected_route":"technical"}
+{"id":"blind-technical-10","message":"更新 API Key 后所有请求都返回未授权","expected_route":"technical"}
+{"id":"blind-technical-11","message":"表格数据保存后刷新就消失了","expected_route":"technical"}
+{"id":"blind-technical-12","message":"访问管理后台时提示证书不受信任","expected_route":"technical"}
+{"id":"blind-billing-01","message":"信用卡账单上显示了相同商户的两笔交易","expected_route":"billing"}
+{"id":"blind-billing-02","message":"退款已显示成功，余额却没有变化","expected_route":"billing"}
+{"id":"blind-billing-03","message":"购买套餐后想把抬头改为单位信息","expected_route":"billing"}
+{"id":"blind-billing-04","message":"支付成功通知到了，但服务仍提示未购买","expected_route":"billing"}
+{"id":"blind-billing-05","message":"账户被自动收取了下一周期费用","expected_route":"billing"}
+{"id":"blind-billing-06","message":"购买时用了折扣码，结算金额却是原价","expected_route":"billing"}
+{"id":"blind-billing-07","message":"退款被原路退回时一般多久到账","expected_route":"billing"}
+{"id":"blind-billing-08","message":"付款订单被关闭了，已付金额如何处理","expected_route":"billing"}
+{"id":"blind-billing-09","message":"发票上的金额和实付金额对不上","expected_route":"billing"}
+{"id":"blind-billing-10","message":"取消会员后为什么仍然产生了扣款","expected_route":"billing"}
+{"id":"blind-billing-11","message":"企业付款后需要提供增值税专票","expected_route":"billing"}
+{"id":"blind-billing-12","message":"这笔退款被拒绝后可以提现吗","expected_route":"billing"}

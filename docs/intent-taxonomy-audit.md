@@ -18,6 +18,6 @@
 
 ## 评测边界
 
-默认开发回归集是 `evaluation/datasets/route_dev_v1.jsonl`：三类各 8 条，不复用 Few-shot 模板。它用于检测代码和路由规则回归，不用于宣称总体准确率。
+项目保存三份互斥数据：`route_dev_v1.jsonl`（快速回归）、`route_validation_v1.jsonl`（选择 Few-shot、融合权重和澄清分差）、`route_blind_v1.jsonl`（参数冻结后的最终检查）。验证和盲测每类各 12 条，均不复用 Embedding 模板或 LLM Few-shot。它们当前是项目内构造样本，只用于工程验证；正式指标仍须使用人工复核的脱敏真实问题。
 
 正式评测应冻结路由定义后，独立构造并人工复核开发集、验证集和盲测集；同一语义簇不能跨集合。盲测集每个最终路由至少保留 10 至 15 条，并报告样本数、Accuracy、Macro-F1、逐类 Precision/Recall/F1 和混淆矩阵。对于“是否转人工”和“是否需要澄清”，应分别以二分类指标报告，而不是混入路由准确率。

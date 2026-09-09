@@ -206,6 +206,7 @@ class RouteEvaluator:
                 "expected": case.expected_route,
                 "predicted": predicted,
                 "confidence": result.confidence,
+                "score_margin": result.score_margin,
                 "reasoning": result.reasoning,
             })
 
@@ -233,7 +234,7 @@ class RouteEvaluator:
             "per_class":  per_class,
             "total":      len(cases),
             "correct":    correct,
-            "sources":    sources or ["llm", "embedding", "pattern"],
+            "sources":    sources or ["llm", "embedding"],
             "cases":      case_details,
         }
 
@@ -508,11 +509,15 @@ class EndToEndEvaluator:
         )
 
 
-# ── 内置 smoke 数据集（独立于 Few-shot 模板，用于快速回归）──────────────────
+# ── 版本化路由数据集 ──────────────────────────────────────────────────────────
 
-DEFAULT_ROUTE_CASES = load_route_cases(
-    pathlib.Path(__file__).parent / "datasets" / "route_dev_v1.jsonl"
-)
+_DATASETS_DIR = pathlib.Path(__file__).parent / "datasets"
+ROUTE_DEV_CASES = load_route_cases(_DATASETS_DIR / "route_dev_v1.jsonl")
+ROUTE_VALIDATION_CASES = load_route_cases(_DATASETS_DIR / "route_validation_v1.jsonl")
+ROUTE_BLIND_CASES = load_route_cases(_DATASETS_DIR / "route_blind_v1.jsonl")
+
+# API 默认使用验证集；盲测必须由显式调用触发，避免被日常调优反复查看。
+DEFAULT_ROUTE_CASES = ROUTE_VALIDATION_CASES
 
 DEFAULT_DIALOG_CASES: List[Dict[str, Any]] = [
     {"question": "我的订单 #12345 还没到，已经超时了"},

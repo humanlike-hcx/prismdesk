@@ -1,0 +1,36 @@
+{"id":"val-general-01","message":"想把账户资料里的联系电话换成新的","expected_route":"general"}
+{"id":"val-general-02","message":"订单编号 A8921 显示待揽收已经两天","expected_route":"general"}
+{"id":"val-general-03","message":"配送员没有联系我就把包裹退回了","expected_route":"general"}
+{"id":"val-general-04","message":"如何查看平台的隐私说明","expected_route":"general"}
+{"id":"val-general-05","message":"预约服务提交错日期了，可以撤回吗","expected_route":"general"}
+{"id":"val-general-06","message":"收货人姓名填错，需要更正","expected_route":"general"}
+{"id":"val-general-07","message":"这个问题反复咨询也没有得到答复","expected_route":"general"}
+{"id":"val-general-08","message":"你们支持哪些地区配送","expected_route":"general"}
+{"id":"val-general-09","message":"积分什么时候会过期","expected_route":"general"}
+{"id":"val-general-10","message":"订单被拆成两个包裹是正常的吗","expected_route":"general"}
+{"id":"val-general-11","message":"我希望关闭营销短信提醒","expected_route":"general"}
+{"id":"val-general-12","message":"人工服务的工作时间是什么时候","expected_route":"general"}
+{"id":"val-technical-01","message":"网页点击保存后一直转圈，没有提交成功","expected_route":"technical"}
+{"id":"val-technical-02","message":"验证码输入正确却提示校验无效","expected_route":"technical"}
+{"id":"val-technical-03","message":"Windows 客户端更新完打不开了","expected_route":"technical"}
+{"id":"val-technical-04","message":"调用接口返回 502 Bad Gateway","expected_route":"technical"}
+{"id":"val-technical-05","message":"切换网络后应用里的消息全部加载失败","expected_route":"technical"}
+{"id":"val-technical-06","message":"账号登录后马上又被退出","expected_route":"technical"}
+{"id":"val-technical-07","message":"上传图片时提示文件解析异常","expected_route":"technical"}
+{"id":"val-technical-08","message":"新版页面在 Safari 上布局错乱","expected_route":"technical"}
+{"id":"val-technical-09","message":"请求一直显示权限不足 403","expected_route":"technical"}
+{"id":"val-technical-10","message":"通知权限已开启但完全收不到推送","expected_route":"technical"}
+{"id":"val-technical-11","message":"系统提示网络超时，但其他网站可以访问","expected_route":"technical"}
+{"id":"val-technical-12","message":"提交表单后出现未知错误代码 E500","expected_route":"technical"}
+{"id":"val-billing-01","message":"银行卡消费记录里有一笔我不认识的订阅扣费","expected_route":"billing"}
+{"id":"val-billing-02","message":"退货审核完成了，退款为什么还没回到原卡","expected_route":"billing"}
+{"id":"val-billing-03","message":"需要把发票开成公司名称和税号","expected_route":"billing"}
+{"id":"val-billing-04","message":"支付页面显示失败，支付宝却已经扣钱","expected_route":"billing"}
+{"id":"val-billing-05","message":"续费前看到的是 68 元，实际收了 98 元","expected_route":"billing"}
+{"id":"val-billing-06","message":"可以取消自动续订并停止下次扣款吗","expected_route":"billing"}
+{"id":"val-billing-07","message":"同一订单被信用卡扣了两遍","expected_route":"billing"}
+{"id":"val-billing-08","message":"电子票据下载后内容为空，能重新开具吗","expected_route":"billing"}
+{"id":"val-billing-09","message":"使用优惠券后金额没有减免","expected_route":"billing"}
+{"id":"val-billing-10","message":"想查询退款目前处理到哪个环节","expected_route":"billing"}
+{"id":"val-billing-11","message":"付款完成后会员权益没有到账","expected_route":"billing"}
+{"id":"val-billing-12","message":"能否补开发上个月的消费发票","expected_route":"billing"}

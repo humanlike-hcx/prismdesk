@@ -23,9 +23,23 @@ def test_few_shot_examples_describe_three_routes():
     result = asyncio.run(recognizer._llm_recognize("这笔钱什么时候退回来", None))
 
     prompt = messages.calls[0]["messages"][0]["content"]
-    assert "billing" in prompt
+    assert '消息: "付款成功但订单没有生效" → 路由: billing' in prompt
+    assert '消息: "输入正确密码后仍无法登录" → 路由: technical' in prompt
     assert '"route":"general|technical|billing"' in prompt
     assert result["route"] == RouteCategory.BILLING
+    assert messages.calls[0]["temperature"] == 0.0
+
+
+def test_llm_result_requires_a_json_object():
+    recognizer = IntentRecognizer.__new__(IntentRecognizer)
+    recognizer.model = "test-model"
+    messages = FakeMessages("billing")
+    recognizer.client = type("Client", (), {"messages": messages})()
+
+    result = asyncio.run(recognizer._llm_recognize("退款多久到账", None))
+
+    assert result["failed"] is True
+    assert len(messages.calls) == 2
 
 
 def test_remote_embedding_batches_inputs_and_restores_response_order(monkeypatch):
@@ -67,23 +81,42 @@ def test_remote_embedding_batches_inputs_and_restores_response_order(monkeypatch
     assert vectors == [[1.0, 0.0], [0.0, 1.0]]
 
 
-def test_pattern_only_mode_returns_route_and_independent_handoff_flag():
+def test_handoff_and_urgency_rules_are_independent_from_route_sources():
     recognizer = IntentRecognizer.__new__(IntentRecognizer)
-    recognizer.threshold = 0.5
+    assert recognizer._handoff_requested("请转人工处理电子发票") is True
+    assert recognizer._handoff_requested("电子发票在哪里下载") is False
+
+
+def test_invalid_route_source_is_rejected():
+    recognizer = IntentRecognizer.__new__(IntentRecognizer)
     recognizer._cache = {}
     recognizer.cache_hits = 0
     recognizer.cache_misses = 0
-
-    result = asyncio.run(recognizer.recognize("转人工处理电子发票", sources=["pattern"]))
-
-    assert result.route == RouteCategory.BILLING
-    assert result.handoff_requested is True
-    assert result.source_scores["pattern"] == 0.5
+    try:
+        asyncio.run(recognizer.recognize("退款多久到账", sources=["pattern"]))
+    except ValueError as exc:
+        assert "无效的路由识别来源" in str(exc)
+    else:
+        raise AssertionError("pattern must not participate in business routing")
 
 
 def test_source_mode_is_part_of_cache_key():
     recognizer = IntentRecognizer.__new__(IntentRecognizer)
-    pattern_key = recognizer._cache_key("退款多久到账", sources={"pattern"})
-    fusion_key = recognizer._cache_key("退款多久到账", sources={"llm", "embedding", "pattern"})
+    embedding_key = recognizer._cache_key("退款多久到账", sources={"embedding"})
+    fusion_key = recognizer._cache_key("退款多久到账", sources={"llm", "embedding"})
 
-    assert pattern_key != fusion_key
+    assert embedding_key != fusion_key
+
+
+def test_two_source_vote_reports_margin_for_clarification_decision():
+    recognizer = IntentRecognizer.__new__(IntentRecognizer)
+    route, confidence, margin, source_scores = recognizer._vote(
+        {"route": RouteCategory.TECHNICAL, "confidence": 0.8},
+        {"route": RouteCategory.BILLING, "confidence": 0.76},
+        {"llm", "embedding"},
+    )
+
+    assert route == RouteCategory.TECHNICAL
+    assert confidence == 0.4
+    assert margin == 0.02
+    assert source_scores == {"llm": 0.8, "embedding": 0.76}

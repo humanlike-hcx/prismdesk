@@ -43,6 +43,7 @@ class IntentResult:
 
     route: RouteCategory
     confidence: float
+    score_margin: float
     urgency: UrgencyLevel
     handoff_requested: bool
     needs_clarification: bool
@@ -52,7 +53,7 @@ class IntentResult:
     source_scores: Dict[str, float] = field(default_factory=dict)
 
 
-# 模板的职责是描述三个 Agent 的稳定责任边界，而不是细分业务任务。
+# Embedding 模板描述三个 Agent 的稳定责任边界，不作为 LLM Few-shot。
 _TEMPLATES: Dict[RouteCategory, List[str]] = {
     RouteCategory.GENERAL: [
         "我的订单现在到哪一步了？",
@@ -74,11 +75,23 @@ _TEMPLATES: Dict[RouteCategory, List[str]] = {
     ],
 }
 
+# Few-shot 专门覆盖相邻业务域的边界。它与 Embedding 模板、验证集和盲测集隔离。
+_LLM_FEW_SHOTS: List[tuple[str, RouteCategory]] = [
+    ("订单显示已发货，但物流两天没有更新", RouteCategory.GENERAL),
+    ("我只想修改账户绑定的邮箱", RouteCategory.GENERAL),
+    ("客服处理太慢，我要反馈这次服务", RouteCategory.GENERAL),
+    ("输入正确密码后仍无法登录", RouteCategory.TECHNICAL),
+    ("升级客户端后页面不断闪退", RouteCategory.TECHNICAL),
+    ("接口提示 403，需要检查什么配置", RouteCategory.TECHNICAL),
+    ("付款成功但订单没有生效", RouteCategory.BILLING),
+    ("我要人工协助核验这笔退款", RouteCategory.BILLING),
+    ("订阅自动续费金额与购买页不同", RouteCategory.BILLING),
+]
+
 _HANDOFF_PATTERNS = (
     "转人工", "人工客服", "人工坐席", "找人工", "真人客服", "人工处理",
 )
 _SOCIAL_PATTERNS = ("你好", "您好", "嗨", "hello", "hi", "在吗", "谢谢", "感谢")
-_COMPLAINT_PATTERNS = ("太差", "糟糕", "不满意", "一直没人", "等了很久", "投诉")
 _URGENCY_KEYWORDS = {
     UrgencyLevel.CRITICAL: ("紧急", "emergency", "urgent", "asap", "立刻"),
     UrgencyLevel.HIGH: ("今天", "马上", "尽快", "hurry", "now"),
@@ -95,14 +108,14 @@ def _cosine(a: List[float], b: List[float]) -> float:
 
 
 class IntentRecognizer:
-    """使用 LLM、Embedding 和模式规则融合决定三路业务路由。"""
+    """使用 LLM 与 Embedding 融合决定三路业务路由。"""
 
     def __init__(
         self,
         api_key: str,
         base_url: Optional[str] = None,
         model: str = "claude-3-5-sonnet-20241022",
-        confidence_threshold: float = 0.5,
+        clarification_margin: float = 0.12,
         embedding_api_key: Optional[str] = None,
         embedding_base_url: Optional[str] = None,
         embedding_model: Optional[str] = None,
@@ -113,7 +126,7 @@ class IntentRecognizer:
             kwargs["base_url"] = base_url
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
-        self.threshold = confidence_threshold
+        self.clarification_margin = clarification_margin
         self._embedding_api_key = (embedding_api_key or "").strip()
         self._embedding_base_url = (embedding_base_url or "").strip().rstrip("/")
         self._embedding_endpoint = (
@@ -138,8 +151,8 @@ class IntentRecognizer:
         history: Optional[List[Dict[str, str]]] = None,
         sources: Optional[List[str]] = None,
     ) -> IntentResult:
-        active_sources = set(sources or ["llm", "embedding", "pattern"])
-        invalid_sources = active_sources - {"llm", "embedding", "pattern"}
+        active_sources = set(sources or ["llm", "embedding"])
+        invalid_sources = active_sources - {"llm", "embedding"}
         if not active_sources or invalid_sources:
             raise ValueError(f"无效的路由识别来源: {sorted(invalid_sources) or '空列表'}")
 
@@ -152,22 +165,26 @@ class IntentRecognizer:
 
         llm_task = asyncio.create_task(self._llm_recognize(message, history)) if "llm" in active_sources else None
         emb_task = asyncio.create_task(self._embedding_recognize(message)) if "embedding" in active_sources else None
-        pattern = self._pattern_recognize(message) if "pattern" in active_sources else self._empty_result()
         pending = [task for task in (llm_task, emb_task) if task is not None]
         if pending:
             await asyncio.gather(*pending)
         llm = llm_task.result() if llm_task else self._empty_result(failed=True)
         embedding = emb_task.result() if emb_task else self._empty_result()
 
-        route, confidence, source_scores = self._vote(llm, embedding, pattern, active_sources)
+        route, confidence, score_margin, source_scores = self._vote(llm, embedding, active_sources)
         normalized = self._clean_text(message)
         handoff_requested = self._handoff_requested(normalized)
         result = IntentResult(
             route=route,
             confidence=confidence,
+            score_margin=score_margin,
             urgency=self._urgency(normalized, handoff_requested),
             handoff_requested=handoff_requested,
-            needs_clarification=(confidence < self.threshold and not self._is_social_message(normalized)),
+            needs_clarification=(
+                not handoff_requested
+                and score_margin < self.clarification_margin
+                and not self._is_social_message(normalized)
+            ),
             entities=self._extract_entities(normalized),
             reasoning=str(llm.get("reasoning", "")),
             latency_ms=(time.monotonic() - t0) * 1000,
@@ -192,8 +209,8 @@ class IntentRecognizer:
         self, message: str, history: Optional[List[Dict[str, str]]]
     ) -> Dict[str, Any]:
         examples = "\n".join(
-            f'  消息: "{templates[0]}" → 路由: {route.value}'
-            for route, templates in _TEMPLATES.items()
+            f'  消息: "{message}" → 路由: {route.value}'
+            for message, route in _LLM_FEW_SHOTS
         )
         context = ""
         if history:
@@ -211,22 +228,33 @@ class IntentRecognizer:
 用户消息: "{self._clean_text(message)}"
 
 只返回 JSON：{{"route":"general|technical|billing", "confidence":0到1, "reasoning":"一句话"}}''')
-        try:
-            response = await self.client.messages.create(
-                model=self.model,
-                max_tokens=192,
-                temperature=0.1,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = extract_text_content(response.content)
-            start, end = raw.find("{"), raw.rfind("}") + 1
-            data = json.loads(raw[start:end])
-            data["route"] = RouteCategory(str(data.get("route", "general")))
-            data["confidence"] = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
-            return data
-        except Exception as ex:
-            logger.warning("LLM 路由识别失败: %s", ex)
-            return self._empty_result(reasoning="LLM 失败", failed=True)
+        for attempt in range(2):
+            try:
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=192,
+                    # 路由是判别任务；固定采样降低同一输入在重复评测中的波动。
+                    temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = extract_text_content(response.content).strip()
+                start, end = raw.find("{"), raw.rfind("}") + 1
+                if start < 0 or end <= start:
+                    raise ValueError("LLM 未返回 JSON 对象")
+                data = json.loads(raw[start:end])
+                data["route"] = RouteCategory(str(data.get("route", "general")))
+                data["confidence"] = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+                return data
+            except (ValueError, json.JSONDecodeError) as ex:
+                if attempt == 0:
+                    logger.info("LLM 路由格式无效，重试一次: %s", ex)
+                    continue
+                logger.warning("LLM 路由识别失败: %s", ex)
+                return self._empty_result(reasoning="LLM 失败", failed=True)
+            except Exception as ex:
+                logger.warning("LLM 路由识别失败: %s", ex)
+                return self._empty_result(reasoning="LLM 失败", failed=True)
+        return self._empty_result(reasoning="LLM 失败", failed=True)
 
     async def _embedding_recognize(self, message: str) -> Dict[str, Any]:
         try:
@@ -242,51 +270,35 @@ class IntentRecognizer:
             logger.warning("Embedding 路由识别失败: %s", ex)
             return self._empty_result()
 
-    def _pattern_recognize(self, message: str) -> Dict[str, Any]:
-        patterns = {
-            RouteCategory.BILLING: (
-                "退款", "退货", "重复扣款", "多扣", "扣费", "支付失败", "支付", "发票", "税号", "订阅", "invoice", "refund",
-            ),
-            RouteCategory.TECHNICAL: (
-                "无法登录", "登录失败", "验证码", "崩溃", "闪退", "报错", "错误码", "页面打不开", "异常", "配置", "error", "crash",
-            ),
-            RouteCategory.GENERAL: (
-                "订单", "物流", "快递", "配送", "账户", "邮箱", "服务", "投诉", "怎么", "什么", "你好", "hello",
-            ),
-        }
-        route, score = self._best_pattern_match(message.lower(), patterns)
-        return {"route": route, "confidence": score}
-
     def _vote(
         self,
         llm: Dict[str, Any],
         embedding: Dict[str, Any],
-        pattern: Dict[str, Any],
         active_sources: set[str],
-    ) -> tuple[RouteCategory, float, Dict[str, float]]:
+    ) -> tuple[RouteCategory, float, float, Dict[str, float]]:
         source_scores = {
             "llm": float(llm.get("confidence", 0.0) or 0.0),
             "embedding": float(embedding.get("confidence", 0.0) or 0.0),
-            "pattern": float(pattern.get("confidence", 0.0) or 0.0),
         }
         if "llm" in active_sources and llm.get("failed"):
-            for source, result in (("embedding", embedding), ("pattern", pattern)):
-                if source in active_sources and result.get("confidence", 0.0) > 0:
-                    return result["route"], source_scores[source], source_scores
-            return RouteCategory.GENERAL, 0.0, source_scores
+            if "embedding" in active_sources and embedding.get("confidence", 0.0) > 0:
+                return embedding["route"], source_scores["embedding"], source_scores["embedding"], source_scores
+            return RouteCategory.GENERAL, 0.0, 0.0, source_scores
 
-        base_weights = {"llm": 0.7, "embedding": 0.2, "pattern": 0.1}
+        base_weights = {"llm": 0.5, "embedding": 0.5}
         total_weight = sum(base_weights[source] for source in active_sources)
         scores: Dict[RouteCategory, float] = {}
-        for source, result in (("llm", llm), ("embedding", embedding), ("pattern", pattern)):
+        for source, result in (("llm", llm), ("embedding", embedding)):
             if source not in active_sources:
                 continue
             route = result.get("route", RouteCategory.GENERAL)
             scores[route] = scores.get(route, 0.0) + (base_weights[source] / total_weight) * float(result.get("confidence", 0.0) or 0.0)
         if not scores:
-            return RouteCategory.GENERAL, 0.0, source_scores
-        route = max(scores, key=scores.get)
-        return route, scores[route], source_scores
+            return RouteCategory.GENERAL, 0.0, 0.0, source_scores
+        ranked_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        route, confidence = ranked_scores[0]
+        score_margin = confidence - (ranked_scores[1][1] if len(ranked_scores) > 1 else 0.0)
+        return route, confidence, round(score_margin, 4), source_scores
 
     def _extract_entities(self, message: str) -> Dict[str, List[str]]:
         return {
@@ -368,26 +380,13 @@ class IntentRecognizer:
                 return level
         if handoff_requested:
             return UrgencyLevel.HIGH
-        if any(pattern in lowered for pattern in _COMPLAINT_PATTERNS):
-            return UrgencyLevel.MEDIUM
         return UrgencyLevel.LOW
 
     def _cache_key(self, message: str, history: Optional[List[Dict[str, str]]] = None, sources: Optional[set[str]] = None) -> str:
-        payload: Dict[str, Any] = {"message": self._clean_text(message)[:200], "sources": sorted(sources or {"llm", "embedding", "pattern"})}
+        payload: Dict[str, Any] = {"message": self._clean_text(message)[:200], "sources": sorted(sources or {"llm", "embedding"})}
         if history:
             payload["history"] = [{"role": self._clean_text(item.get("role", ""))[:20], "content": self._clean_text(item.get("content", ""))[:160]} for item in history[-3:]]
         return hashlib.md5(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _best_pattern_match(message: str, patterns: Dict[RouteCategory, tuple[str, ...]]) -> tuple[RouteCategory, float]:
-        best_route, best_score = RouteCategory.GENERAL, 0.0
-        for route, keywords in patterns.items():
-            hits = sum(keyword in message for keyword in keywords)
-            if hits:
-                score = min(1.0, 0.5 + 0.25 * (hits - 1))
-                if score > best_score:
-                    best_route, best_score = route, score
-        return best_route, best_score
 
     @staticmethod
     def _unique(values: List[str]) -> List[str]:

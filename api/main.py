@@ -12,7 +12,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 _ROOT = str(pathlib.Path(__file__).parent.parent.resolve())
@@ -251,6 +251,7 @@ class ChatResponse(BaseModel):
     retrieved_count: int = 0
     entities: Dict[str, List[str]] = Field(default_factory=dict)
     route_confidence: float = 0.0
+    route_score_margin: float = 0.0
     route_source_scores: Dict[str, float] = Field(default_factory=dict)
 
 
@@ -390,6 +391,7 @@ async def chat(req: ChatRequest):
         ),
         entities=intent_result.entities,
         route_confidence=round(intent_result.confidence, 4),
+        route_score_margin=round(intent_result.score_margin, 4),
         route_source_scores=intent_result.source_scores,
     )
 
@@ -525,6 +527,7 @@ class EvalDialogInput(BaseModel):
 class EvalRunInput(BaseModel):
     """评测请求。为空时使用内置默认用例。"""
     route_cases: Optional[List[EvalRouteInput]] = None
+    route_suite: Literal["validation", "blind", "dev"] = "validation"
     dialog_cases: Optional[List[EvalDialogInput]] = None
     route_sources: Optional[List[str]] = None
 
@@ -615,7 +618,13 @@ async def run_eval(body: Optional[EvalRunInput] = None):
     """运行内置评测用例，返回评测报告。"""
     if _evaluator is None:
         raise HTTPException(503, "服务未就绪")
-    from evaluation.evaluator import DEFAULT_DIALOG_CASES, DEFAULT_ROUTE_CASES, RouteTestCase
+    from evaluation.evaluator import (
+        DEFAULT_DIALOG_CASES,
+        ROUTE_BLIND_CASES,
+        ROUTE_DEV_CASES,
+        ROUTE_VALIDATION_CASES,
+        RouteTestCase,
+    )
 
     if body and body.route_cases is not None:
         route_cases = [
@@ -627,7 +636,12 @@ async def run_eval(body: Optional[EvalRunInput] = None):
             for c in body.route_cases
         ]
     else:
-        route_cases = DEFAULT_ROUTE_CASES
+        suites = {
+            "validation": ROUTE_VALIDATION_CASES,
+            "blind": ROUTE_BLIND_CASES,
+            "dev": ROUTE_DEV_CASES,
+        }
+        route_cases = suites[body.route_suite] if body else ROUTE_VALIDATION_CASES
 
     if body and body.dialog_cases is not None:
         dialog_cases = [
