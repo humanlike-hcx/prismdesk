@@ -1,6 +1,6 @@
 # 评测说明
 
-`datasets/route_dev_v1.jsonl` 是快速回归集，每类 8 条；`route_validation_v1.jsonl` 是参数选择用验证集，每类 12 条；`route_blind_v1.jsonl` 是参数冻结后才运行的留出集，每类 12 条。三者均不复用 Embedding 模板或 LLM Few-shot，且彼此不重复。该留出集由项目构造，不能称为真正的业务盲测；真实盲测应由未参与开发的人独立抽样和标注。
+`datasets/route_dev_v1.jsonl` 是快速回归集，每类 8 条；`route_validation_v1.jsonl` 是参数选择用验证集，每类 20 条；`route_blind_v1.jsonl` 是参数冻结后才运行的留出集，每类 20 条。三者均不复用 Embedding 模板或 LLM Few-shot，且彼此不重复。该留出集由项目构造，不能称为真正的业务盲测；真实盲测应由未参与开发的人独立抽样和标注。
 
 它用于发现开发回归，不足以证明“准确率提升 10%”。旧的 `intent_smoke_v1.jsonl` 保留为历史资料，不再由评测器读取。
 

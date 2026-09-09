@@ -34,3 +34,27 @@
 {"id":"val-billing-10","message":"想查询退款目前处理到哪个环节","expected_route":"billing"}
 {"id":"val-billing-11","message":"付款完成后会员权益没有到账","expected_route":"billing"}
 {"id":"val-billing-12","message":"能否补开发上个月的消费发票","expected_route":"billing"}
+{"id":"val-general-13","message":"订单已经签收，但我实际没有拿到包裹","expected_route":"general"}
+{"id":"val-general-14","message":"能否合并两笔订单一起配送","expected_route":"general"}
+{"id":"val-general-15","message":"想知道平台是否支持海外收货地址","expected_route":"general"}
+{"id":"val-general-16","message":"如何注销不再使用的账号","expected_route":"general"}
+{"id":"val-general-17","message":"商品缺货后订单会自动取消吗","expected_route":"general"}
+{"id":"val-general-18","message":"下单时备注给商家的内容在哪里查看","expected_route":"general"}
+{"id":"val-general-19","message":"请问客服工单通常多久回复一次","expected_route":"general"}
+{"id":"val-general-20","message":"我想修改已经提交的配送地址","expected_route":"general"}
+{"id":"val-technical-13","message":"网页在点击提交按钮后没有任何响应","expected_route":"technical"}
+{"id":"val-technical-14","message":"iOS 更新后应用频繁要求重新登录","expected_route":"technical"}
+{"id":"val-technical-15","message":"接口返回 429，怎样恢复正常调用","expected_route":"technical"}
+{"id":"val-technical-16","message":"下载附件时总提示连接中断","expected_route":"technical"}
+{"id":"val-technical-17","message":"登录页面的人机验证图片无法加载","expected_route":"technical"}
+{"id":"val-technical-18","message":"开启双重验证后收不到验证短信","expected_route":"technical"}
+{"id":"val-technical-19","message":"系统导入 CSV 文件时一直卡在百分之零","expected_route":"technical"}
+{"id":"val-technical-20","message":"切换语言后部分菜单变成空白","expected_route":"technical"}
+{"id":"val-billing-13","message":"银行卡已经扣款，但订单列表没有这笔记录","expected_route":"billing"}
+{"id":"val-billing-14","message":"退款金额少于原来支付的金额，麻烦核对","expected_route":"billing"}
+{"id":"val-billing-15","message":"购买服务后怎样获取付款凭证","expected_route":"billing"}
+{"id":"val-billing-16","message":"我需要把本次消费改用另一张卡支付","expected_route":"billing"}
+{"id":"val-billing-17","message":"为什么同一笔订单同时显示预授权和扣款","expected_route":"billing"}
+{"id":"val-billing-18","message":"月度套餐可以提前终止并退还余额吗","expected_route":"billing"}
+{"id":"val-billing-19","message":"结算时税费的计算金额似乎不正确","expected_route":"billing"}
+{"id":"val-billing-20","message":"支付渠道显示处理中已经超过一天","expected_route":"billing"}

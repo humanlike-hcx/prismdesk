@@ -7,8 +7,8 @@ from evaluation.evaluator import ROUTE_BLIND_CASES, ROUTE_DEV_CASES, ROUTE_VALID
 def test_each_route_dataset_covers_every_route_evenly():
     for cases, expected_count in (
         (ROUTE_DEV_CASES, 8),
-        (ROUTE_VALIDATION_CASES, 12),
-        (ROUTE_BLIND_CASES, 12),
+        (ROUTE_VALIDATION_CASES, 20),
+        (ROUTE_BLIND_CASES, 20),
     ):
         counts = Counter(case.expected_route for case in cases)
         assert set(counts) == {route.value for route in RouteCategory}

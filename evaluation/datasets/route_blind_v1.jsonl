@@ -34,3 +34,27 @@
 {"id":"blind-billing-10","message":"取消会员后为什么仍然产生了扣款","expected_route":"billing"}
 {"id":"blind-billing-11","message":"企业付款后需要提供增值税专票","expected_route":"billing"}
 {"id":"blind-billing-12","message":"这笔退款被拒绝后可以提现吗","expected_route":"billing"}
+{"id":"blind-general-13","message":"订单里的赠品为什么没有随包裹发出","expected_route":"general"}
+{"id":"blind-general-14","message":"如何把常用地址设为默认地址","expected_route":"general"}
+{"id":"blind-general-15","message":"货物到达后发现外包装破损，应该怎么反馈","expected_route":"general"}
+{"id":"blind-general-16","message":"平台服务条款最近有更新吗","expected_route":"general"}
+{"id":"blind-general-17","message":"订单还没发货，可以更换商品规格吗","expected_route":"general"}
+{"id":"blind-general-18","message":"希望删除之前保存的联系人信息","expected_route":"general"}
+{"id":"blind-general-19","message":"请问一个账号最多能管理几个收货地址","expected_route":"general"}
+{"id":"blind-general-20","message":"商家迟迟不确认订单，我该怎么催办","expected_route":"general"}
+{"id":"blind-technical-13","message":"安装程序提示缺少运行组件，无法继续安装","expected_route":"technical"}
+{"id":"blind-technical-14","message":"打开深色模式后文字和背景颜色重叠","expected_route":"technical"}
+{"id":"blind-technical-15","message":"调用上传接口时返回 413 Request Entity Too Large","expected_route":"technical"}
+{"id":"blind-technical-16","message":"账号绑定设备后同步数据始终停在初始化","expected_route":"technical"}
+{"id":"blind-technical-17","message":"密码修改成功后旧密码仍能登录","expected_route":"technical"}
+{"id":"blind-technical-18","message":"使用代理网络时客户端无法建立连接","expected_route":"technical"}
+{"id":"blind-technical-19","message":"搜索功能输入关键词后返回空白页面","expected_route":"technical"}
+{"id":"blind-technical-20","message":"浏览器提示此站点存在重定向次数过多","expected_route":"technical"}
+{"id":"blind-billing-13","message":"订单使用礼品卡支付后余额没有扣除","expected_route":"billing"}
+{"id":"blind-billing-14","message":"付款失败后银行提示资金已冻结，什么时候解冻","expected_route":"billing"}
+{"id":"blind-billing-15","message":"能否把多笔订单合并开在同一张发票上","expected_route":"billing"}
+{"id":"blind-billing-16","message":"免费提现次数用完后收取的费用是多少","expected_route":"billing"}
+{"id":"blind-billing-17","message":"为什么购买页面和最终账单使用了不同币种","expected_route":"billing"}
+{"id":"blind-billing-18","message":"我误点付款后想撤销这一笔交易","expected_route":"billing"}
+{"id":"blind-billing-19","message":"企业账户充值后余额一直没有更新","expected_route":"billing"}
+{"id":"blind-billing-20","message":"订阅退款申请提交后可以在哪里查看进度","expected_route":"billing"}
