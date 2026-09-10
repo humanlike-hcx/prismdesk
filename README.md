@@ -35,7 +35,7 @@ docker compose logs -f prismdesk
 
 Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。先启动 Docker Desktop，然后双击桌面的 **PrismDesk 演示启动** 快捷方式；也可以双击项目根目录的 `启动 PrismDesk.cmd`。
 
-入口会自动定位项目、在后台启动服务、等待健康检查通过，并在默认浏览器中打开 API 文档。
+入口会自动定位项目、在后台启动服务并进入 CLI 对话界面。每轮回答后会显示业务路由、执行 Agent、置信度、RAG 状态、工具和耗时。输入 `/help` 可查看 CLI 命令。
 
 如需从终端启动，可运行：
 
