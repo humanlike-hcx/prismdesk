@@ -15,13 +15,19 @@ if (-not (Test-Path -LiteralPath $python)) {
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # Use a separate Redis port to avoid conflicts with other local projects.
-$redisRunning = docker ps --filter "name=^/prismdesk-redis-demo$" --format "{{.Names}}"
+$redisRunning = & docker ps --filter "name=^/prismdesk-redis-demo$" --format "{{.Names}}"
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker Desktop is not available. Start Docker Desktop, then launch PrismDesk again."
+}
 if (-not $redisRunning) {
-    docker start prismdesk-redis-demo | Out-Null
+    & docker start prismdesk-redis-demo | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The PrismDesk Redis container could not be started. Start Docker Desktop and try again."
+    }
 }
 
 # load_dotenv does not override these explicit local demo settings.
-$env:PYTHONPATH = "$root\.demo-lib;$root"
+$env:PYTHONPATH = $root
 $env:REDIS_URL = "redis://:prismdesk123@127.0.0.1:6380/0"
 $env:CHROMA_HOST = "127.0.0.1"
 $env:CHROMA_PORT = "8001"

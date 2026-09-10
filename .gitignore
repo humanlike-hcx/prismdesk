@@ -8,6 +8,7 @@ build/
 venv/
 .demo-venv/
 .demo-lib/
+.demo-runtime/
 
 # 环境变量（含敏感信息）
 .env

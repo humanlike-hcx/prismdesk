@@ -33,7 +33,11 @@ docker compose logs -f prismdesk
 
 ## 本机演示
 
-Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。先启动 Docker Desktop，再在 PowerShell 中运行：
+Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。先启动 Docker Desktop，然后双击桌面的 **PrismDesk 演示启动** 快捷方式；也可以双击项目根目录的 `启动 PrismDesk.cmd`。
+
+入口会自动定位项目、在后台启动服务、等待健康检查通过，并在默认浏览器中打开 API 文档。
+
+如需从终端启动，可运行：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-demo.ps1
