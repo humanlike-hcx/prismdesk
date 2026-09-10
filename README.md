@@ -31,6 +31,16 @@ docker compose logs -f prismdesk
 - API 文档：[localhost:8000/docs](http://localhost:8000/docs)
 - 健康检查：[localhost:8000/health](http://localhost:8000/health)
 
+## 本机演示
+
+Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。先启动 Docker Desktop，再在 PowerShell 中运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-demo.ps1
+```
+
+随后打开 [localhost:8000/docs](http://127.0.0.1:8000/docs)。该脚本使用项目专用 Redis 端口 `6380`，避免影响其他项目；演示模式跳过默认知识库的首次向量化，初始知识库为空，可通过 `/knowledge/add` 或 `/knowledge/upload` 导入演示资料。停止 API 可运行 `scripts\stop-demo.ps1`。
+
 ## 目录
 
 | 目录 | 用途 |

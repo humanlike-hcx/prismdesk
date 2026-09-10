@@ -14,6 +14,7 @@ ChromaDB 在这里的角色：
 import asyncio
 import hashlib
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import chromadb
@@ -64,9 +65,15 @@ class KnowledgeBase:
             metadata={"description": "PrismDesk RAG 知识库"},
         )
 
-        # 如果知识库为空，导入默认文档
+        # 如果知识库为空，默认导入演示文档。演示启动可显式关闭，避免首次
+        # 下载 Chroma 默认 Embedding 模型阻塞 API 就绪；真实业务应通过
+        # /knowledge/add 或 /knowledge/upload 导入自己的资料。
         if self._collection.count() == 0:
-            self._load_default_docs()
+            load_defaults = os.getenv("PRISMDESK_LOAD_DEFAULT_KB", "true").strip().lower()
+            if load_defaults in {"1", "true", "yes", "on"}:
+                self._load_default_docs()
+            else:
+                logger.info("知识库为空，已跳过默认演示文档初始化")
 
     # ── 文档管理 ──────────────────────────────────────────────────────────────
 
@@ -107,6 +114,10 @@ class KnowledgeBase:
 
         ChromaDB 内部自动将 query 转为向量，与存储的文档向量做余弦相似度匹配。
         """
+        # 空库没有可检索内容，直接返回，避免首次请求为无意义的 query 下载
+        # 默认 Embedding 模型并阻塞用户响应。
+        if self._collection.count() == 0:
+            return []
         results = self._collection.query(
             query_texts=[query],
             n_results=top_k,
