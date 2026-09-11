@@ -25,21 +25,20 @@ services:
 
   # ── ChromaDB 向量数据库（情景记忆 + 用户画像）────────────────────────────────
   chromadb:
-    image: chromadb/chroma:0.5.23
+    image: chromadb/chroma:1.5.9
     container_name: prismdesk-chromadb
     ports:
       - "8001:8000"
     environment:
       - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
       - ANONYMIZED_TELEMETRY=FALSE
     volumes:
-      - chromadb-data:/chroma/chroma
+      - chromadb-data:/data
     restart: unless-stopped
     networks:
       - prismdesk-network
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v2/heartbeat || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

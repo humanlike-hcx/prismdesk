@@ -20,15 +20,42 @@ if (-not $redisRunning) {
     }
 }
 
+$chromaRunning = & docker ps --filter "name=^/prismdesk-chromadb$" --format "{{.Names}}"
+if (-not $chromaRunning) {
+    & docker start prismdesk-chromadb | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The PrismDesk ChromaDB container could not be started."
+    }
+}
+
 $env:PYTHONPATH = $root
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+$env:NO_PROXY = "127.0.0.1,localhost"
+$env:no_proxy = $env:NO_PROXY
 $env:REDIS_URL = "redis://:prismdesk123@127.0.0.1:6380/0"
 $env:CHROMA_HOST = "127.0.0.1"
 $env:CHROMA_PORT = "8001"
 $env:CHROMA_PERSIST_DIRECTORY = Join-Path $root "data\chroma-demo"
 $env:PRISMDESK_SKILLS_DIR = Join-Path $root "skills"
 $env:PRISMDESK_LOAD_DEFAULT_KB = "false"
+
+$chromaReady = $false
+for ($attempt = 1; $attempt -le 15; $attempt++) {
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:8001/api/v2/heartbeat"
+        if ($response.StatusCode -eq 200) {
+            $chromaReady = $true
+            break
+        }
+    }
+    catch {
+        Start-Sleep -Seconds 1
+    }
+}
+if (-not $chromaReady) {
+    throw "The PrismDesk ChromaDB container did not become ready."
+}
 
 Push-Location $root
 try {

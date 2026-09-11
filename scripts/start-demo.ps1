@@ -28,6 +28,8 @@ if (-not $redisRunning) {
 
 # load_dotenv does not override these explicit local demo settings.
 $env:PYTHONPATH = $root
+$env:NO_PROXY = "127.0.0.1,localhost"
+$env:no_proxy = $env:NO_PROXY
 $env:REDIS_URL = "redis://:prismdesk123@127.0.0.1:6380/0"
 $env:CHROMA_HOST = "127.0.0.1"
 $env:CHROMA_PORT = "8001"
