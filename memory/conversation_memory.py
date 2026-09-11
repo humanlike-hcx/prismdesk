@@ -322,6 +322,10 @@ class MemoryManager:
         if not query_text:
             return []
         try:
+            # 空 collection 不可能返回历史；提前返回可避免 Chroma 客户端为一次
+            # 无意义检索下载默认 embedding 模型，尤其影响首次 CLI 对话。
+            if await asyncio.to_thread(self._episodic.count) == 0:
+                return []
             results = await self._query_episodic(
                 query_text,
                 n_results=self.HISTORY_TOP_K,

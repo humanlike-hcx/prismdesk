@@ -5,6 +5,7 @@ PrismDesk 智能客服系统 — FastAPI 入口
 所有核心组件在 lifespan 中初始化，通过环境变量配置。
 """
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -12,7 +13,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
 
 _ROOT = str(pathlib.Path(__file__).parent.parent.resolve())
@@ -23,6 +24,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
@@ -451,6 +453,109 @@ async def _build_knowledge_context(message: str, top_k: int = 3) -> KnowledgeCon
         return KnowledgeContextResult(attempted=True)
 
 
+def _sse(event: str, payload: Dict[str, Any]) -> str:
+    """按 Server-Sent Events 格式编码单个事件。"""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+@app.post("/chat/stream", tags=["Chat"])
+async def chat_stream(req: ChatRequest):
+    """SSE 流式聊天接口；token 事件可直接转发到 Web 或 CLI。"""
+    if _orchestrator is None or _memory is None:
+        raise HTTPException(503, "服务未就绪")
+
+    async def events() -> AsyncIterator[str]:
+        from agents.agent_orchestrator import Request as OrcReq
+        from memory.conversation_memory import MsgRole
+        from core.rag_policy import RAGPolicy, decide_rag_policy
+
+        conv_id = req.conv_id or str(uuid.uuid4())
+        try:
+            yield _sse("meta", {"conv_id": conv_id})
+            yield _sse("status", {"message": "正在读取对话记忆"})
+            mem_ctx = await _memory.get_context(req.user_id, conv_id, query=req.message)
+            history = [
+                {"role": message.role.value, "content": message.content}
+                for message in mem_ctx.recent_messages[-5:]
+            ] if mem_ctx.recent_messages else None
+
+            yield _sse("status", {"message": "正在识别问题类型"})
+            intent_result = await _orchestrator.recognize_intent(req.message, history=history)
+            rag_policy = decide_rag_policy(
+                req.message,
+                intent_result.route,
+                handoff_requested=intent_result.handoff_requested,
+            )
+            full_context = mem_ctx.to_prompt_text()
+            retrieval = KnowledgeContextResult()
+            if rag_policy == RAGPolicy.REQUIRED:
+                yield _sse("status", {"message": "正在查询知识库"})
+                retrieval = await _build_knowledge_context(req.message, top_k=3)
+                if retrieval.context:
+                    full_context = "\n\n".join(part for part in (full_context, retrieval.context) if part)
+
+            orch_req = OrcReq(
+                message=req.message,
+                user_id=req.user_id,
+                conv_id=conv_id,
+                context=full_context,
+                history=history,
+                entities=intent_result.entities,
+                route=intent_result.route,
+                handoff_requested=intent_result.handoff_requested,
+                needs_clarification=intent_result.needs_clarification,
+                urgency=intent_result.urgency,
+                route_confidence=intent_result.confidence,
+                rag_policy=rag_policy,
+                rag_prefetched=retrieval.success,
+            )
+
+            result = None
+            async for event in _orchestrator.run_stream(orch_req):
+                if event["type"] == "token":
+                    yield _sse("token", {"text": event["text"]})
+                elif event["type"] == "status":
+                    yield _sse("status", {"message": event["message"]})
+                elif event["type"] == "done":
+                    result = event["result"]
+
+            if result is None:
+                raise RuntimeError("流式编排未返回最终结果")
+
+            await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
+            await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
+            asyncio.create_task(_memory.update_profile(req.user_id, conv_id))
+
+            rag_tool_traces = [
+                trace for trace in result.tool_traces
+                if trace.get("tool_name") == "search_knowledge_base"
+            ]
+            agent_retrieval_success = any(
+                trace.get("success") and trace.get("result_success") is not False
+                for trace in rag_tool_traces
+            )
+            yield _sse("done", {
+                "conv_id": conv_id,
+                "request_id": result.request_id,
+                "route": result.route.value if result.route else "general",
+                "agent_type": result.agent_type.value,
+                "tools_used": result.tools_used,
+                "escalated": result.escalated,
+                "latency_ms": round(result.latency_ms, 1),
+                "knowledge_used": retrieval.success or agent_retrieval_success,
+                "rag_policy": rag_policy.value,
+            })
+        except Exception as ex:
+            logger.exception("流式聊天失败")
+            yield _sse("error", {"message": "抱歉，处理请求时出现问题，请稍后重试。"})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/monitor")
 async def monitor_summary():
     """实时监控摘要：Agent 成功率、工具统计、告警、优化建议。"""
@@ -678,6 +783,13 @@ async def run_eval(body: Optional[EvalRunInput] = None):
 
 # ── 交互式 CLI ────────────────────────────────────────────────────────────────
 async def _cli():
+    # 某些三方库会在入口加载前配置 root handler；CLI 单独重设已有 handler，
+    # 避免把技能扫描和每一次 HTTP 请求淹没在用户对话中。
+    if os.getenv("PRISMDESK_CLI_QUIET", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.WARNING)
+        for handler in root_logger.handlers:
+            handler.setLevel(logging.WARNING)
     print(BANNER)
     print("PrismDesk CLI — 输入 quit 退出\n")
 
@@ -727,12 +839,24 @@ async def _cli():
             for m in ctx.recent_messages[-5:]
         ] if ctx.recent_messages else None
         req = Request(message=msg, user_id=user_id, conv_id=conv_id, context=ctx.to_prompt_text(), history=history)
-        result = await orch.run(req)
+        print("\nPrismDesk: ", end="", flush=True)
+        result = None
+        emitted = False
+        async for event in orch.run_stream(req):
+            if event["type"] == "token":
+                print(event["text"], end="", flush=True)
+                emitted = True
+            elif event["type"] == "done":
+                result = event["result"]
 
+        if result is None:
+            print("抱歉，未能生成回答。", end="")
+            continue
+        if not emitted:
+            print(result.response, end="")
         await mem.add_message(user_id, conv_id, MsgRole.USER, msg)
         await mem.add_message(user_id, conv_id, MsgRole.ASSISTANT, result.response)
-
-        print(f"\nPrismDesk [{result.agent_type.value}]: {result.response}\n")
+        print("\n")
 
     await mem.close()
 

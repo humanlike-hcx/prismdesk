@@ -26,7 +26,7 @@ from collections import deque
 from datetime import datetime
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from anthropic import AsyncAnthropic
 
@@ -243,6 +243,45 @@ class BaseAgent:
                 latency_ms=ms,
             )
 
+    async def stream_handle(self, req: Request) -> AsyncIterator[Dict[str, Any]]:
+        """流式执行最终回答；工具调用仍在模型的 tool-use 回合中完整处理。"""
+        t0 = time.monotonic()
+        self.stats.total += 1
+        try:
+            async for event in self._call_llm_stream(req):
+                if event["type"] == "complete":
+                    generation = event["generation"]
+                    ms = (time.monotonic() - t0) * 1000
+                    self.stats.success += 1
+                    self.stats.total_ms += ms
+                    yield {
+                        "type": "complete",
+                        "response": AgentResponse(
+                            agent_type=self.agent_type,
+                            content=generation.content,
+                            success=True,
+                            latency_ms=ms,
+                            escalate=self._needs_escalation(generation.content),
+                            tools_used=generation.tools_used,
+                            tool_traces=generation.tool_traces,
+                        ),
+                    }
+                else:
+                    yield event
+        except Exception as ex:
+            ms = (time.monotonic() - t0) * 1000
+            self.stats.total_ms += ms
+            logger.error("%s 流式处理失败: %s", self.agent_type.value, ex)
+            yield {
+                "type": "complete",
+                "response": AgentResponse(
+                    agent_type=self.agent_type,
+                    content="抱歉，处理您的请求时出现问题，请稍后重试。",
+                    success=False,
+                    latency_ms=ms,
+                ),
+            }
+
     async def _call_llm(self, req: Request) -> AgentGeneration:
         def _clean(s: str) -> str:
             return s.encode("utf-8", errors="ignore").decode("utf-8")
@@ -339,6 +378,125 @@ class BaseAgent:
                         "error": error_text,
                     }
                 )
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
+            messages.append({"role": "user", "content": tool_results})
+
+        raise RuntimeError(f"{self.agent_type.value} 工具调用超过最大轮数")
+
+    async def _call_llm_stream(self, req: Request) -> AsyncIterator[Dict[str, Any]]:
+        """与 _call_llm 保持相同的工具循环，但最终文本通过 SSE 上游逐段产出。"""
+        def _clean(s: str) -> str:
+            return s.encode("utf-8", errors="ignore").decode("utf-8")
+
+        messages: List[Dict[str, Any]] = []
+        if req.context:
+            messages.extend([
+                {"role": "user", "content": f"[背景信息]\n{_clean(req.context)}"},
+                {"role": "assistant", "content": "好的，我已了解背景信息。"},
+            ])
+        if req.entities:
+            entities_text = json.dumps(req.entities, ensure_ascii=False)
+            messages.extend([
+                {"role": "user", "content": f"[结构化实体]\n{_clean(entities_text)}"},
+                {"role": "assistant", "content": "好的，我会结合这些结构化实体处理。"},
+            ])
+        role_packet = self._build_role_packet(req)
+        if role_packet:
+            messages.extend([
+                {"role": "user", "content": f"[角色输入契约]\n{_clean(role_packet)}"},
+                {"role": "assistant", "content": "好的，我会按照该角色的输入和输出契约处理。"},
+            ])
+        messages.append({"role": "user", "content": _clean(req.message)})
+
+        tools = self.get_tools()
+        if req.rag_policy == RAGPolicy.FORBIDDEN or req.rag_prefetched:
+            tools.pop("search_knowledge_base", None)
+        tools_used: List[str] = []
+        tool_traces: List[Dict[str, Any]] = []
+
+        for _ in range(3):
+            request_kwargs: Dict[str, Any] = {
+                "model": self._model,
+                "max_tokens": self.profile.max_tokens,
+                "temperature": self.profile.temperature,
+                "system": self._build_system_prompt(req),
+                "messages": messages,
+            }
+            if tools:
+                request_kwargs["tools"] = [
+                    {"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
+                    for spec in tools.values()
+                ]
+
+            # Anthropic-compatible API 以 SSE 返回 text_delta；SDK 负责解析事件。
+            async with self._client.messages.stream(**request_kwargs) as stream:
+                async for text in stream.text_stream:
+                    if text:
+                        yield {"type": "token", "text": text}
+                resp = await stream.get_final_message()
+
+            tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
+            if not tool_uses:
+                yield {
+                    "type": "complete",
+                    "generation": AgentGeneration(
+                        content=extract_text_content(resp.content),
+                        tools_used=tools_used,
+                        tool_traces=tool_traces,
+                    ),
+                }
+                return
+
+            messages.append({"role": "assistant", "content": resp.content})
+            tool_results = []
+            for block in tool_uses:
+                name = self._block_value(block, "name")
+                tool_use_id = self._block_value(block, "id")
+                args = self._block_value(block, "input") or {}
+                spec = tools.get(name)
+                tool_t0 = time.monotonic()
+                call_success = True
+                result_success: Optional[bool] = None
+                error_text = ""
+                yield {"type": "status", "message": f"正在调用工具：{name}"}
+                if spec is None:
+                    call_success = False
+                    result: Any = {"success": False, "error": f"工具不在 {self.agent_type.value} Agent 白名单中"}
+                    error_text = result["error"]
+                else:
+                    try:
+                        self._validate_tool_input(spec, args)
+                        result = spec.handler(req, args)
+                        if inspect.isawaitable(result):
+                            result = await result
+                        tools_used.append(name)
+                        if isinstance(result, dict) and "success" in result:
+                            result_success = bool(result.get("success"))
+                    except Exception as ex:
+                        call_success = False
+                        logger.warning("Agent 工具 %s 执行失败: %s", name, ex)
+                        error_text = str(ex)
+                        result = {"success": False, "error": error_text}
+                tool_latency_ms = (time.monotonic() - tool_t0) * 1000
+                if not error_text and isinstance(result, dict):
+                    error_text = str(result.get("error", "") or "")
+                tool_traces.append({
+                    "agent_type": self.agent_type.value,
+                    "tool_name": name,
+                    "tool_use_id": tool_use_id,
+                    "input": dict(args),
+                    "success": call_success,
+                    "result_success": result_success,
+                    "latency_ms": round(tool_latency_ms, 1),
+                    "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
+                    "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
+                    "result_count": len(result.get("results", [])) if isinstance(result, dict) else 0,
+                    "error": error_text,
+                })
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
@@ -820,6 +978,108 @@ class AgentOrchestrator:
         )
         self._record_tool_trace(result)
         return result
+
+    async def run_stream(self, req: Request) -> AsyncIterator[Dict[str, Any]]:
+        """按事件产出编排状态与最终回答 token，供 CLI 和 SSE 接口共用。"""
+        t0 = time.monotonic()
+        if req.route is None:
+            yield {"type": "status", "message": "正在识别问题类型"}
+            route_result = await self._intent_recognizer.recognize(req.message, history=req.history)
+            req.route = route_result.route
+            req.handoff_requested = route_result.handoff_requested
+            req.needs_clarification = route_result.needs_clarification
+            req.urgency = route_result.urgency
+            req.route_confidence = route_result.confidence
+
+        if self._needs_clarification(req):
+            result = OrchestratorResult(
+                request_id=req.request_id,
+                response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
+                agent_type=AgentType.GENERAL,
+                route=req.route,
+                handoff_requested=req.handoff_requested,
+                needs_clarification=req.needs_clarification,
+                latency_ms=(time.monotonic() - t0) * 1000,
+                agent_types=[AgentType.GENERAL],
+                primary_agent=AgentType.GENERAL,
+                routing_reason="业务路由置信度不足，先澄清用户需求",
+                routing_confidence=req.route_confidence,
+            )
+            self._record_tool_trace(result)
+            yield {"type": "token", "text": result.response}
+            yield {"type": "done", "result": result}
+            return
+
+        decision = self._route_decision(req)
+        if decision.multi_agent:
+            # 并行 Agent 的工具结果需要先汇总，随后由 Composer 给出单一答复。
+            yield {"type": "status", "message": "正在协调多个专业 Agent"}
+            result = await self.run_parallel(req, decision)
+            yield {"type": "token", "text": result.response}
+            yield {"type": "done", "result": result}
+            return
+
+        agent = self._best_agent(decision.primary_agent) or self._best_agent(AgentType.GENERAL)
+        if agent is None:
+            result = OrchestratorResult(
+                request_id=req.request_id,
+                response="服务暂时不可用，请稍后重试。",
+                agent_type=AgentType.GENERAL,
+                route=req.route,
+                latency_ms=(time.monotonic() - t0) * 1000,
+                agent_types=[AgentType.GENERAL],
+                primary_agent=AgentType.GENERAL,
+                routing_reason=decision.reason,
+                routing_confidence=decision.confidence,
+            )
+            self._record_tool_trace(result)
+            yield {"type": "token", "text": result.response}
+            yield {"type": "done", "result": result}
+            return
+
+        yield {"type": "status", "message": f"正在由 {agent.agent_type.value} Agent 生成回答"}
+        response: Optional[AgentResponse] = None
+        async for event in agent.stream_handle(req):
+            if event["type"] == "complete":
+                response = event["response"]
+            else:
+                yield event
+
+        # 流服务本身不可用时，沿用原来的专属 Agent → GeneralAgent 降级规则。
+        if response is None or not response.success:
+            if decision.primary_agent not in (AgentType.GENERAL, AgentType.ESCALATION):
+                fallback = self._best_agent(AgentType.GENERAL)
+                if fallback and fallback is not agent:
+                    yield {"type": "status", "message": "正在切换到通用客服"}
+                    response = await fallback.handle(req)
+                    yield {"type": "token", "text": response.content}
+            if response is None:
+                response = AgentResponse(
+                    agent_type=AgentType.GENERAL,
+                    content="抱歉，处理您的请求时出现问题，请稍后重试。",
+                    success=False,
+                )
+
+        escalated = bool(response.escalate or req.urgency == UrgencyLevel.CRITICAL or req.handoff_requested)
+        result = OrchestratorResult(
+            request_id=req.request_id,
+            response=response.content,
+            agent_type=response.agent_type,
+            route=req.route,
+            handoff_requested=req.handoff_requested,
+            needs_clarification=req.needs_clarification,
+            escalated=escalated,
+            latency_ms=(time.monotonic() - t0) * 1000,
+            agent_types=[response.agent_type],
+            primary_agent=decision.primary_agent,
+            supporting_agents=[],
+            tools_used=list(response.tools_used),
+            tool_traces=list(response.tool_traces),
+            routing_reason=decision.reason,
+            routing_confidence=decision.confidence,
+        )
+        self._record_tool_trace(result)
+        yield {"type": "done", "result": result}
 
     async def run_parallel(self, req: Request, decision: RoutingDecision) -> OrchestratorResult:
         """

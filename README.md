@@ -31,6 +31,16 @@ docker compose logs -f prismdesk
 - API 文档：[localhost:8000/docs](http://localhost:8000/docs)
 - 健康检查：[localhost:8000/health](http://localhost:8000/health)
 
+## 流式对话
+
+`POST /chat/stream` 以 Server-Sent Events（SSE）返回事件。`status` 表示记忆、路由或工具阶段，`token` 是最终回答的增量文本，`done` 返回会话与路由元数据，`error` 表示请求失败。模型返回的流仍是 HTTP 长连接，客户端不必等待完整回答生成。
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message":"你好","user_id":"demo-user"}'
+```
+
 ## 本机演示
 
 Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。先启动 Docker Desktop，然后在项目根目录的终端中运行：
@@ -39,7 +49,7 @@ Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。
 .\prismdesk.cmd
 ```
 
-命令会准备本机 Redis，并调用项目内置的 `python api/main.py --cli` 入口，在当前终端进入对话。输入 `quit`、`exit` 或 `退出` 可结束会话。
+命令会连接 Compose 启动的 Redis 与 ChromaDB，并调用项目内置的 `python api/main.py --cli` 入口，在当前终端进入逐段输出的对话。输入 `quit`、`exit` 或 `退出` 可结束会话；初始化和 HTTP 诊断日志默认不会显示。
 
 如需从终端启动，可运行：
 
