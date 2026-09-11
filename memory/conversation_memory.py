@@ -325,7 +325,11 @@ class MemoryManager:
             results = await self._query_episodic(
                 query_text,
                 n_results=self.HISTORY_TOP_K,
-                where={"user_id": self._safe_text(user_id), "conv_id": self._safe_text(conv_id)},
+                # Chroma 1.x 要求多字段条件使用显式逻辑操作符。
+                where={"$and": [
+                    {"user_id": self._safe_text(user_id)},
+                    {"conv_id": self._safe_text(conv_id)},
+                ]},
             )
             docs = self._extract_docs(results)
             if len(docs) < self.HISTORY_TOP_K:

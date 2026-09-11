@@ -31,6 +31,8 @@ if (-not $chromaRunning) {
 $env:PYTHONPATH = $root
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+# CLI 面向终端对话，隐藏技能加载与 HTTP 请求的常规诊断日志；错误和告警仍会显示。
+$env:LOG_LEVEL = "WARNING"
 $env:NO_PROXY = "127.0.0.1,localhost"
 $env:no_proxy = $env:NO_PROXY
 $env:REDIS_URL = "redis://:prismdesk123@127.0.0.1:6379/0"
