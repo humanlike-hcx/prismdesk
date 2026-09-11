@@ -38,7 +38,7 @@ services:
     networks:
       - prismdesk-network
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v2/heartbeat || exit 1"]
+      test: ["CMD", "chroma", "--version"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -82,6 +82,8 @@ services:
     environment:
       # 容器内固定值，覆盖 .env 中的本地路径
       - REDIS_URL=redis://:${REDIS_PASSWORD:-prismdesk123}@redis:6379/0
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
       - CHROMA_PERSIST_DIRECTORY=/app/data/chroma
       - EVAL_BASELINE_PATH=/app/data/eval/baseline.json
       - PRISMDESK_SKILLS_DIR=/app/skills
@@ -121,7 +123,8 @@ services:
     networks:
       - prismdesk-network
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/health || exit 1"]
+      # nginx:alpine 中 localhost 优先解析为 IPv6，但此配置只监听 IPv4。
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

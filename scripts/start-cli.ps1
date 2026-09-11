@@ -9,12 +9,12 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "Demo Python environment was not found: $python"
 }
 
-$redisRunning = & docker ps --filter "name=^/prismdesk-redis-demo$" --format "{{.Names}}"
+$redisRunning = & docker ps --filter "name=^/prismdesk-redis$" --format "{{.Names}}"
 if ($LASTEXITCODE -ne 0) {
     throw "Docker Desktop is not available. Start Docker Desktop, then launch PrismDesk again."
 }
 if (-not $redisRunning) {
-    & docker start prismdesk-redis-demo | Out-Null
+    & docker start prismdesk-redis | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "The PrismDesk Redis container could not be started."
     }
@@ -33,7 +33,7 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:NO_PROXY = "127.0.0.1,localhost"
 $env:no_proxy = $env:NO_PROXY
-$env:REDIS_URL = "redis://:prismdesk123@127.0.0.1:6380/0"
+$env:REDIS_URL = "redis://:prismdesk123@127.0.0.1:6379/0"
 $env:CHROMA_HOST = "127.0.0.1"
 $env:CHROMA_PORT = "8001"
 $env:CHROMA_PERSIST_DIRECTORY = Join-Path $root "data\chroma-demo"
