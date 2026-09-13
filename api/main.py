@@ -648,8 +648,8 @@ async def add_knowledge(body: BatchDocInput):
     ```json
     {
       "documents": [
-        {"title": "退款政策", "content": "用户在购买后 7 天内可以申请无理由退款..."},
-        {"title": "配送说明", "content": "标准配送 3-5 个工作日..."}
+        {"title": "KB-101 退款申请标准流程（v1.0）", "content": "退款处理分为资格核验、材料补充..."},
+        {"title": "KB-201 登录失败与账户访问排查（v1.0）", "content": "登录失败按以下顺序排查..."}
       ]
     }
     ```
@@ -660,7 +660,13 @@ async def add_knowledge(body: BatchDocInput):
     kb = tool.handler.__self__
     count = await kb.add_documents_async([{"title": d.title, "content": d.content} for d in body.documents])
     total = await kb.doc_count_async()
-    return {"message": f"成功导入 {count} 个文档片段", "added_chunks": count, "total_chunks": total}
+    invalidated = _tool_manager.invalidate_cache("knowledge_search")
+    return {
+        "message": f"成功导入 {count} 个文档片段",
+        "added_chunks": count,
+        "total_chunks": total,
+        "invalidated_cache_entries": invalidated,
+    }
 
 
 @app.post("/knowledge/upload", tags=["知识库"])
@@ -701,10 +707,12 @@ async def upload_knowledge(file: UploadFile = File(...)):
 
     count = await kb.add_documents_async(docs)
     total = await kb.doc_count_async()
+    invalidated = _tool_manager.invalidate_cache("knowledge_search")
     return {
         "message": f"文件 {filename} 导入成功",
         "added_chunks": count,
         "total_chunks": total,
+        "invalidated_cache_entries": invalidated,
     }
 
 

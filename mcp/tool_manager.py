@@ -418,6 +418,18 @@ class MCPToolManager:
                 del self._cache[k]
         self._cache[self._cache_key(name, params, rerank_top_k)] = (data, time.monotonic() + ttl, reranked)
 
+    def invalidate_cache(self, tool_name: Optional[str] = None) -> int:
+        """清理全部缓存或某个工具的缓存，并返回删除条目数。"""
+        if tool_name is None:
+            count = len(self._cache)
+            self._cache.clear()
+            return count
+        prefix = f"{tool_name}:"
+        keys = [key for key in self._cache if key.startswith(prefix)]
+        for key in keys:
+            del self._cache[key]
+        return len(keys)
+
     # ── 参数校验 ──────────────────────────────────────────────────────────────
 
     _TYPE_MAP = {"string": str, "number": (int, float), "integer": int, "boolean": bool, "array": list, "object": dict}

@@ -51,6 +51,14 @@ Docker Hub 网络不可用时，可使用已经配置好的本机演示环境。
 
 命令会连接 Compose 启动的 Redis 与 ChromaDB，并调用项目内置的 `python api/main.py --cli` 入口，在当前终端进入逐段输出的对话。输入 `quit`、`exit` 或 `退出` 可结束会话；初始化和 HTTP 诊断日志默认不会显示。
 
+项目提供一套版本化的演示客服知识包。启动 API 后可重复执行以下命令导入，确定性文档 ID 和 Chroma `upsert` 会更新已有内容而不会重复创建：
+
+```powershell
+.\scripts\seed-knowledge.ps1
+```
+
+知识包位于 `knowledge/standard_customer_service.json`，其中的退款、账单和处理流程仅用于 PrismDesk 演示，不代表真实商家政策或法律承诺。
+
 如需从终端启动，可运行：
 
 ```powershell
