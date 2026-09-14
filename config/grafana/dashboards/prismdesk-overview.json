@@ -1,0 +1,283 @@
+{
+  "id": null,
+  "uid": "prismdesk-overview",
+  "title": "PrismDesk Overview",
+  "tags": [
+    "prismdesk",
+    "agent"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Agent success rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_agent_success_rate",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent average latency",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_agent_avg_latency_ms",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent requests",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_agent_requests",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Routing score",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_agent_routing_score",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool success rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_tool_success_rate",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool average latency",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_tool_avg_latency_ms",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool calls",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_tool_calls",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool circuit state (0 closed, 1 open)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prismdesk-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "prismdesk_tool_circuit_open",
+          "legendFormat": "{{{{agent}}}}{{{{tool}}}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    }
+  ]
+}

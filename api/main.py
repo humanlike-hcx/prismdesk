@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -80,6 +81,53 @@ def _embedding_cfg() -> Dict[str, Any]:
     }
 
 
+async def _create_rag_tool_manager(cfg: Dict[str, Any], embedding_cfg: Dict[str, Any]):
+    """Create the same knowledge tool runtime for API and CLI entry points."""
+    from mcp.knowledge_base import KnowledgeBase
+    from mcp.tool_manager import MCPToolManager, Tool
+
+    manager = MCPToolManager(
+        api_key=cfg["api_key"],
+        base_url=cfg.get("base_url"),
+        model=cfg["model"],
+    )
+    kb = KnowledgeBase(
+        chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
+        chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
+        chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
+        collection_name=os.getenv("RAG_COLLECTION_NAME", ""),
+        **embedding_cfg,
+    )
+
+    def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
+        query = params.get("query", "")
+        return [{
+            "title": "知识库降级结果",
+            "content": f"知识库暂时不可用，未能完成对‘{query}’的语义检索。请稍后重试，或转人工客服确认。",
+            "score": 0.0,
+            "fallback": True,
+            "error": error,
+        }]
+
+    manager.register(Tool(
+        name="knowledge_search",
+        description="搜索知识库（基于 ChromaDB 向量检索）",
+        handler=kb.search_handler,
+        schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+        cache_ttl=300.0,
+        supports_rerank=True,
+        fallback=knowledge_fallback,
+    ))
+    return manager, kb
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
@@ -89,8 +137,6 @@ async def lifespan(app: FastAPI):
     from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_rag_tools
     from core.intent_recognizer import IntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
-    from mcp.knowledge_base import KnowledgeBase
-    from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
     from monitor.performance_monitor import PerformanceMonitor
     from core.skill_loader import SkillManager
@@ -135,47 +181,10 @@ async def lifespan(app: FastAPI):
         model=cfg["model"],
     )
 
-    # MCP 工具管理器 + RAG 知识库（基于 ChromaDB 的真实检索）
-    _tool_manager = MCPToolManager(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-    )
-    kb = KnowledgeBase(
-        chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
-        chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
-        chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
-    )
+    # MCP 工具管理器 + RAG 知识库（API 与 CLI 共享同一初始化路径）
+    _tool_manager, kb = await _create_rag_tool_manager(cfg, embedding_cfg)
     logger.info(f"知识库已加载: {await kb.doc_count_async()} 个文档片段")
-
-    def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
-        query = params.get("query", "")
-        return [{
-            "title": "知识库降级结果",
-            "content": f"知识库暂时不可用，未能完成对“{query}”的语义检索。请稍后重试，或转人工客服确认。",
-            "score": 0.0,
-            "fallback": True,
-            "error": error,
-        }]
-
-    _tool_manager.register(Tool(
-        name="knowledge_search",
-        description="搜索知识库（基于 ChromaDB 向量检索）",
-        handler=kb.search_handler,
-        schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "top_k": {"type": "integer"},
-            },
-            "required": ["query"],
-        },
-        cache_ttl=300.0,
-        supports_rerank=True,
-        fallback=knowledge_fallback,
-    ))
-    if _orchestrator is not None:
-        _orchestrator.set_shared_tools(build_shared_rag_tools(_tool_manager))
+    _orchestrator.set_shared_tools(build_shared_rag_tools(_tool_manager))
 
     # 性能监控（可选启动 Prometheus）
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
@@ -723,7 +732,7 @@ async def knowledge_stats():
     if tool is None:
         raise HTTPException(503, "知识库未初始化")
     kb = tool.handler.__self__
-    return {"total_chunks": await kb.doc_count_async()}
+    return {"total_chunks": await kb.doc_count_async(), **kb.embedding_info}
 
 
 @app.post("/eval/run")
@@ -789,6 +798,11 @@ async def run_eval(body: Optional[EvalRunInput] = None):
     }
 
 
+def _normalize_cli_markdown(value: str) -> str:
+    """Repair a common model formatting slip before terminal rendering."""
+    return re.sub(r"([。！？.!?])\s*(#{1,6}\s+)", r"\1\n\n\2", value)
+
+
 # ── 交互式 CLI ────────────────────────────────────────────────────────────────
 async def _cli():
     # 某些三方库会在入口加载前配置 root handler；CLI 单独重设已有 handler，
@@ -801,9 +815,12 @@ async def _cli():
     print(BANNER)
     print("PrismDesk CLI — 输入 quit 退出\n")
 
-    from agents.agent_orchestrator import AgentOrchestrator, Request
+    from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_rag_tools
     from memory.conversation_memory import MemoryManager, MsgRole
     from core.skill_loader import SkillManager
+    from rich.console import Console
+    from rich.live import Live
+    from rich.markdown import Markdown
 
     cfg = _anthropic_cfg()
     embedding_cfg = _embedding_cfg()
@@ -819,6 +836,10 @@ async def _cli():
         skill_manager=skill_manager,
         **embedding_cfg,
     )
+    cli_tool_manager, cli_kb = await _create_rag_tool_manager(cfg, embedding_cfg)
+    orch.set_shared_tools(build_shared_rag_tools(cli_tool_manager))
+    if not os.getenv("PRISMDESK_CLI_QUIET", "true").lower() in {"1", "true", "yes", "on"}:
+        logger.info("CLI 知识库已加载: %s 个文档片段", await cli_kb.doc_count_async())
     mem  = MemoryManager(
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
         chroma_host=os.getenv("CHROMA_HOST", "localhost"),
@@ -830,6 +851,8 @@ async def _cli():
     )
 
     user_id, conv_id = "cli_user", str(uuid.uuid4())
+    console = Console()
+    render_markdown = console.is_terminal and os.getenv("PRISMDESK_CLI_MARKDOWN", "true").lower() in {"1", "true", "yes", "on"}
 
     while True:
         try:
@@ -847,21 +870,30 @@ async def _cli():
             for m in ctx.recent_messages[-5:]
         ] if ctx.recent_messages else None
         req = Request(message=msg, user_id=user_id, conv_id=conv_id, context=ctx.to_prompt_text(), history=history)
-        print("\nPrismDesk: ", end="", flush=True)
+        console.print("\n[bold cyan]PrismDesk[/bold cyan]")
         result = None
-        emitted = False
-        async for event in orch.run_stream(req):
-            if event["type"] == "token":
-                print(event["text"], end="", flush=True)
-                emitted = True
-            elif event["type"] == "done":
-                result = event["result"]
+        answer_parts: List[str] = []
+        if render_markdown:
+            with Live(Markdown("_正在生成…_"), console=console, refresh_per_second=8, vertical_overflow="ellipsis") as live:
+                async for event in orch.run_stream(req):
+                    if event["type"] == "token":
+                        answer_parts.append(event["text"])
+                        live.update(Markdown(_normalize_cli_markdown("".join(answer_parts))))
+                    elif event["type"] == "done":
+                        result = event["result"]
+        else:
+            async for event in orch.run_stream(req):
+                if event["type"] == "token":
+                    answer_parts.append(event["text"])
+                    print(event["text"], end="", flush=True)
+                elif event["type"] == "done":
+                    result = event["result"]
 
         if result is None:
-            print("抱歉，未能生成回答。", end="")
+            console.print("[red]抱歉，未能生成回答。[/red]")
             continue
-        if not emitted:
-            print(result.response, end="")
+        if not answer_parts:
+            console.print(Markdown(_normalize_cli_markdown(result.response)) if render_markdown else result.response)
         await mem.add_message(user_id, conv_id, MsgRole.USER, msg)
         await mem.add_message(user_id, conv_id, MsgRole.ASSISTANT, result.response)
         print("\n")

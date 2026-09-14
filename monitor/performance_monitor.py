@@ -22,7 +22,7 @@ from enum import Enum
 from typing import Any, Deque, Dict, List, Optional
 
 import httpx
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import Gauge, start_http_server
 
 logger = logging.getLogger(__name__)
 
@@ -144,10 +144,14 @@ class PerformanceMonitor:
 
     def _setup_prometheus(self, port: int) -> None:
         self._prom = {
-            "agent_success_rate": Gauge("agent_success_rate", "Agent 成功率", ["agent"]),
-            "agent_latency_ms":   Histogram("agent_latency_ms", "Agent 延迟", ["agent"]),
-            "tool_success_rate":  Gauge("tool_success_rate", "工具成功率", ["tool"]),
-            "requests_total":     Counter("requests_total", "总请求数"),
+            "agent_requests":     Gauge("prismdesk_agent_requests", "Agent 累计处理次数", ["agent"]),
+            "agent_success_rate": Gauge("prismdesk_agent_success_rate", "Agent 成功率", ["agent"]),
+            "agent_avg_ms":       Gauge("prismdesk_agent_avg_latency_ms", "Agent 平均延迟（毫秒）", ["agent"]),
+            "agent_routing_score": Gauge("prismdesk_agent_routing_score", "Agent 当前路由评分", ["agent"]),
+            "tool_calls":         Gauge("prismdesk_tool_calls", "工具累计调用次数", ["tool"]),
+            "tool_success_rate":  Gauge("prismdesk_tool_success_rate", "工具成功率", ["tool"]),
+            "tool_avg_ms":        Gauge("prismdesk_tool_avg_latency_ms", "工具平均延迟（毫秒）", ["tool"]),
+            "tool_circuit_open":  Gauge("prismdesk_tool_circuit_open", "工具熔断状态：closed=0 half_open=0.5 open=1", ["tool"]),
         }
         start_http_server(port)
         logger.info(f"Prometheus 已启动: :{port}")
@@ -207,9 +211,11 @@ class PerformanceMonitor:
             self._check_threshold("agent_avg_ms", ms, agent_key)
 
             # Prometheus
-            if "agent_success_rate" in self._prom:
+            if self._prom:
+                self._prom["agent_requests"].labels(agent=agent_key).set(s["total"])
                 self._prom["agent_success_rate"].labels(agent=agent_key).set(sr)
-                self._prom["agent_latency_ms"].labels(agent=agent_key).observe(ms)
+                self._prom["agent_avg_ms"].labels(agent=agent_key).set(ms)
+                self._prom["agent_routing_score"].labels(agent=agent_key).set(s["routing_score"])
 
             routing_penalties[agent_key] = self._routing_penalty(sr, ms)
 
@@ -222,8 +228,12 @@ class PerformanceMonitor:
             self._check_threshold("tool_success_rate", sr, tool_name)
             self._check_threshold("tool_avg_ms", ms, tool_name)
 
-            if "tool_success_rate" in self._prom:
+            if self._prom:
+                circuit_value = {"closed": 0.0, "half_open": 0.5, "open": 1.0}.get(s["circuit_state"], -1.0)
+                self._prom["tool_calls"].labels(tool=tool_name).set(s["total"])
                 self._prom["tool_success_rate"].labels(tool=tool_name).set(sr)
+                self._prom["tool_avg_ms"].labels(tool=tool_name).set(ms)
+                self._prom["tool_circuit_open"].labels(tool=tool_name).set(circuit_value)
 
             # 连续失败 → 生成具体建议
             if cf >= 3:
@@ -256,10 +266,15 @@ class PerformanceMonitor:
         threshold, severity, operator = self.THRESHOLDS[metric]
         triggered = (operator == "less_than" and value < threshold) or \
                     (operator == "greater_than" and value > threshold)
+        alert_key = f"{metric}:{label}"
+        active = next((item for item in reversed(self._alerts) if item.metric == alert_key and not item.resolved), None)
         if triggered:
+            if active:
+                active.value = value
+                return
             alert = Alert(
                 severity=severity,
-                metric=f"{metric}:{label}",
+                metric=alert_key,
                 message=f"{label} 的 {metric} = {value:.3f}，阈值 {threshold}",
                 value=value,
                 threshold=threshold,
@@ -269,6 +284,9 @@ class PerformanceMonitor:
             # 异步发送 Webhook（不阻塞采集循环）
             if self._webhook:
                 asyncio.create_task(self._send_webhook(alert))
+        elif active:
+            active.resolved = True
+            logger.info("告警已恢复: %s", alert_key)
 
     def _generate_routing_suggestions(self, agent_stats: Dict[str, Any]) -> None:
         """

@@ -67,6 +67,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-demo.ps1
 
 随后打开 [localhost:8000/docs](http://127.0.0.1:8000/docs)。该脚本使用项目专用 Redis 端口 `6380`，避免影响其他项目；演示模式跳过默认知识库的首次向量化，初始知识库为空，可通过 `/knowledge/add` 或 `/knowledge/upload` 导入演示资料。停止 API 可运行 `scripts\stop-demo.ps1`。
 
+
+## 监控
+
+Compose 启动后可使用三种入口：
+
+- `http://127.0.0.1:8000/monitor`：当前 Agent/工具统计、告警和优化建议（JSON）。
+- `http://127.0.0.1:9090`：Prometheus 原始指标与 PromQL 查询。
+- `http://127.0.0.1:3000/d/prismdesk-overview`：Grafana 的 PrismDesk Overview 面板，本地默认允许匿名只读访问。
+
+Grafana 管理员账号为 `admin`，密码由 `.env` 的 `GRAFANA_ADMIN_PASSWORD` 配置。Agent 与工具指标来自应用内存，Prometheus 每 10 秒采集并写入持久卷，Grafana 负责展示。
+
+CLI 在交互式终端中使用 Rich 动态渲染 Markdown；重定向到文件时自动回退为原始文本。可设置 `PRISMDESK_CLI_MARKDOWN=false` 关闭渲染。
+
+RAG 文档入库和查询使用 `EMBEDDING_*` 配置的同一 OpenAI 兼容模型，并显式把向量写入 ChromaDB。`RAG_COLLECTION_NAME` 用于隔离不同模型的向量；更换模型时必须使用新的 collection 并重新导入知识包。
+
 ## 目录
 
 | 目录 | 用途 |

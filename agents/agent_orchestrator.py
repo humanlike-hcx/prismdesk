@@ -215,40 +215,26 @@ class BaseAgent:
         self._shared_tools = dict(tools or {})
 
     async def handle(self, req: Request) -> AgentResponse:
-        t0 = time.monotonic()
-        self.stats.total += 1
-        try:
-            generation = await self._call_llm(req)
-            ms = (time.monotonic() - t0) * 1000
-            self.stats.success += 1
-            self.stats.total_ms += ms
-            escalate = self._needs_escalation(generation.content)
-            return AgentResponse(
-                agent_type=self.agent_type,
-                content=generation.content,
-                success=True,
-                latency_ms=ms,
-                escalate=escalate,
-                tools_used=generation.tools_used,
-                tool_traces=generation.tool_traces,
-            )
-        except Exception as ex:
-            ms = (time.monotonic() - t0) * 1000
-            self.stats.total_ms += ms
-            logger.error(f"{self.agent_type.value} 处理失败: {ex}")
-            return AgentResponse(
-                agent_type=self.agent_type,
-                content="抱歉，处理您的请求时出现问题，请稍后重试。",
-                success=False,
-                latency_ms=ms,
-            )
+        """Collect the shared streaming execution path for non-stream callers."""
+        response: Optional[AgentResponse] = None
+        async for event in self.stream_handle(req, emit_tokens=False):
+            if event["type"] == "complete":
+                response = event["response"]
+        if response is None:
+            raise RuntimeError(f"{self.agent_type.value} execution produced no final response")
+        return response
 
-    async def stream_handle(self, req: Request) -> AsyncIterator[Dict[str, Any]]:
-        """流式执行最终回答；工具调用仍在模型的 tool-use 回合中完整处理。"""
+    async def stream_handle(
+        self,
+        req: Request,
+        *,
+        emit_tokens: bool = True,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """执行统一 Agent 状态机；调用方决定是否接收文本增量。"""
         t0 = time.monotonic()
         self.stats.total += 1
         try:
-            async for event in self._call_llm_stream(req):
+            async for event in self._run_llm_steps(req, emit_tokens=emit_tokens):
                 if event["type"] == "complete":
                     generation = event["generation"]
                     ms = (time.monotonic() - t0) * 1000
@@ -282,113 +268,13 @@ class BaseAgent:
                 ),
             }
 
-    async def _call_llm(self, req: Request) -> AgentGeneration:
-        def _clean(s: str) -> str:
-            return s.encode("utf-8", errors="ignore").decode("utf-8")
-
-        messages = []
-        if req.context:
-            messages.append({"role": "user", "content": f"[背景信息]\n{_clean(req.context)}"})
-            messages.append({"role": "assistant", "content": "好的，我已了解背景信息。"})
-        if req.entities:
-            entities_text = json.dumps(req.entities, ensure_ascii=False)
-            messages.append({"role": "user", "content": f"[结构化实体]\n{_clean(entities_text)}"})
-            messages.append({"role": "assistant", "content": "好的，我会结合这些结构化实体处理。"})
-        role_packet = self._build_role_packet(req)
-        if role_packet:
-            messages.append({"role": "user", "content": f"[角色输入契约]\n{_clean(role_packet)}"})
-            messages.append({"role": "assistant", "content": "好的，我会按照该角色的输入和输出契约处理。"})
-        messages.append({"role": "user", "content": _clean(req.message)})
-
-        tools = self.get_tools()
-        if req.rag_policy == RAGPolicy.FORBIDDEN or req.rag_prefetched:
-            tools.pop("search_knowledge_base", None)
-        tools_used: List[str] = []
-        tool_traces: List[Dict[str, Any]] = []
-        for _ in range(3):
-            request_kwargs: Dict[str, Any] = {
-                "model": self._model,
-                "max_tokens": self.profile.max_tokens,
-                "temperature": self.profile.temperature,
-                "system": self._build_system_prompt(req),
-                "messages": messages,
-            }
-            if tools:
-                request_kwargs["tools"] = [
-                    {
-                        "name": spec.name,
-                        "description": spec.description,
-                        "input_schema": spec.input_schema,
-                    }
-                    for spec in tools.values()
-                ]
-            resp = await self._client.messages.create(**request_kwargs)
-            tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
-            if not tool_uses:
-                return AgentGeneration(
-                    content=extract_text_content(resp.content),
-                    tools_used=tools_used,
-                    tool_traces=tool_traces,
-                )
-
-            messages.append({"role": "assistant", "content": resp.content})
-            tool_results = []
-            for block in tool_uses:
-                name = self._block_value(block, "name")
-                tool_use_id = self._block_value(block, "id")
-                args = self._block_value(block, "input") or {}
-                spec = tools.get(name)
-                tool_t0 = time.monotonic()
-                call_success = True
-                result_success: Optional[bool] = None
-                error_text = ""
-                if spec is None:
-                    call_success = False
-                    result: Any = {"success": False, "error": f"工具不在 {self.agent_type.value} Agent 白名单中"}
-                    error_text = result["error"]
-                else:
-                    try:
-                        self._validate_tool_input(spec, args)
-                        result = spec.handler(req, args)
-                        if inspect.isawaitable(result):
-                            result = await result
-                        tools_used.append(name)
-                        if isinstance(result, dict) and "success" in result:
-                            result_success = bool(result.get("success"))
-                    except Exception as ex:
-                        call_success = False
-                        logger.warning("Agent 工具 %s 执行失败: %s", name, ex)
-                        error_text = str(ex)
-                        result = {"success": False, "error": error_text}
-                tool_latency_ms = (time.monotonic() - tool_t0) * 1000
-                if not error_text and isinstance(result, dict):
-                    error_text = str(result.get("error", "") or "")
-                tool_traces.append(
-                    {
-                        "agent_type": self.agent_type.value,
-                        "tool_name": name,
-                        "tool_use_id": tool_use_id,
-                        "input": dict(args),
-                        "success": call_success,
-                        "result_success": result_success,
-                        "latency_ms": round(tool_latency_ms, 1),
-                        "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
-                        "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
-                        "result_count": len(result.get("results", [])) if isinstance(result, dict) else 0,
-                        "error": error_text,
-                    }
-                )
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": json.dumps(result, ensure_ascii=False),
-                })
-            messages.append({"role": "user", "content": tool_results})
-
-        raise RuntimeError(f"{self.agent_type.value} 工具调用超过最大轮数")
-
-    async def _call_llm_stream(self, req: Request) -> AsyncIterator[Dict[str, Any]]:
-        """与 _call_llm 保持相同的工具循环，但最终文本通过 SSE 上游逐段产出。"""
+    async def _run_llm_steps(
+        self,
+        req: Request,
+        *,
+        emit_tokens: bool,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """唯一的消息构造与工具循环；仅模型传输方式按调用方切换。"""
         def _clean(s: str) -> str:
             return s.encode("utf-8", errors="ignore").decode("utf-8")
 
@@ -432,12 +318,15 @@ class BaseAgent:
                     for spec in tools.values()
                 ]
 
-            # Anthropic-compatible API 以 SSE 返回 text_delta；SDK 负责解析事件。
-            async with self._client.messages.stream(**request_kwargs) as stream:
-                async for text in stream.text_stream:
-                    if text:
-                        yield {"type": "token", "text": text}
-                resp = await stream.get_final_message()
+            if emit_tokens:
+                # Anthropic-compatible API 以 SSE 返回 text_delta；SDK 负责解析事件。
+                async with self._client.messages.stream(**request_kwargs) as stream:
+                    async for text in stream.text_stream:
+                        if text:
+                            yield {"type": "token", "text": text}
+                    resp = await stream.get_final_message()
+            else:
+                resp = await self._client.messages.create(**request_kwargs)
 
             tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
             if not tool_uses:
@@ -548,6 +437,7 @@ class BaseAgent:
             f"升级条件：{'；'.join(self.profile.handoff_conditions) or '无，按通用客服规则处理'}\n"
             f"允许的数据/工具范围：{'、'.join(self.profile.tool_scope) or '仅使用当前请求上下文'}\n"
             "不要声称执行了未提供的查询、修改或退款操作；缺少证据时明确说明需要核验。"
+            "使用 Markdown 时，标题前后必须留空行，列表项必须独占一行，不要把标题标记粘在正文后。"
         )
         base_prompt = f"{self.system_prompt}{profile_prompt}"
         if self._skill_manager is None:

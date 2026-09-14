@@ -2,7 +2,7 @@
 RAG 知识库 —— 基于 ChromaDB 的真实检索实现。
 
 功能：
-  1. 文档导入：将文本切片后存入 ChromaDB（自动生成 Embedding）
+  1. 文档导入：将文本切片，通过配置的服务生成 Embedding 后存入 ChromaDB
   2. 语义检索：根据 query 从知识库中检索最相关的文档片段
   3. 与 MCP 工具框架集成：作为 knowledge_search 工具的真实 handler
 
@@ -16,10 +16,12 @@ import hashlib
 import logging
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import chromadb
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +30,37 @@ class KnowledgeBase:
     """
     基于 ChromaDB 的 RAG 知识库。
 
-    ChromaDB 内置了 Embedding 模型（all-MiniLM-L6-v2），
-    调用 add() 时自动生成向量，query() 时自动做语义匹配。
-    不需要额外调用 Anthropic Embeddings API。
+    生产模式通过 OpenAI 兼容的 Embedding API 显式生成文档和查询向量，
+    ChromaDB 只负责存储与相似度检索。文档和查询必须使用同一模型。
+    未配置远端 Embedding 时保留 Chroma 默认模型，便于离线开发。
     """
 
-    COLLECTION_NAME = "knowledge_base"
+    DEFAULT_COLLECTION_NAME = "knowledge_base"
 
     def __init__(
         self,
         chroma_host: str = "localhost",
         chroma_port: int = 8000,
         chroma_path: str = "./data/chroma",
+        embedding_api_key: str = "",
+        embedding_base_url: str = "",
+        embedding_model: str = "",
+        embedding_timeout_s: float = 20.0,
+        collection_name: str = "",
     ):
-        # 优先连接独立 ChromaDB 服务（服务端内置 embedding 模型，客户端无需下载）
+        self._embedding_api_key = embedding_api_key.strip()
+        base_url = embedding_base_url.strip().rstrip("/")
+        self._embedding_endpoint = base_url if base_url.endswith("/embeddings") else f"{base_url}/embeddings"
+        self._embedding_model = embedding_model.strip()
+        self._embedding_timeout_s = embedding_timeout_s
+        self._remote_embedding_enabled = bool(
+            self._embedding_api_key and base_url and self._embedding_model
+        )
+        configured_name = collection_name.strip() or os.getenv("RAG_COLLECTION_NAME", "").strip()
+        self.collection_name = configured_name or self.DEFAULT_COLLECTION_NAME
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]", self.collection_name):
+            raise ValueError(f"非法 RAG collection 名称: {self.collection_name!r}")
+        # 优先连接独立 ChromaDB 服务；Embedding 由当前 Python 调用侧负责生成。
         self._use_server = False
         try:
             # HttpClient 默认也会初始化 ChromaDB telemetry；显式关闭避免 posthog 兼容性错误日志。
@@ -60,11 +79,17 @@ class KnowledgeBase:
                 settings=chromadb.Settings(anonymized_telemetry=False),
             )
 
-        # 使用服务端时不传 embedding_function，让服务端处理
-        # 本地模式时也不传，使用 ChromaDB 默认的（会触发模型下载）
+        # Chroma 的 HttpClient 仍在调用侧生成 query_texts 的向量；远端模式
+        # 因此始终显式传 embeddings，避免 CLI 下载默认 ONNX 模型。
+        collection_metadata = {
+            "description": "PrismDesk RAG 知识库",
+            "embedding_provider": "remote" if self._remote_embedding_enabled else "chroma_default",
+            "embedding_model": self._embedding_model or "all-MiniLM-L6-v2",
+            "hnsw:space": "cosine",
+        }
         self._collection = self._client.get_or_create_collection(
-            name=self.COLLECTION_NAME,
-            metadata={"description": "PrismDesk RAG 知识库"},
+            name=self.collection_name,
+            metadata=collection_metadata,
         )
 
         # 如果知识库为空，默认导入演示文档。演示启动可显式关闭，避免首次
@@ -100,9 +125,13 @@ class KnowledgeBase:
                 metas.append({"title": title, "chunk_index": i, "total_chunks": len(chunks)})
 
         if ids:
-            # ChromaDB 会自动生成 Embedding
-            # 确定性 ID + upsert 使初始化和人工导入可以安全重复执行。
-            self._collection.upsert(ids=ids, documents=docs, metadatas=metas)
+            # 远端模式显式生成向量；不允许失败后静默切换模型，否则同一
+            # collection 会混入不同维度或不同向量空间的数据。
+            embeddings = self._embed_texts(docs) if self._remote_embedding_enabled else None
+            kwargs: Dict[str, Any] = {"ids": ids, "documents": docs, "metadatas": metas}
+            if embeddings is not None:
+                kwargs["embeddings"] = embeddings
+            self._collection.upsert(**kwargs)
             logger.info(f"知识库导入 {len(ids)} 个文档片段")
 
         return len(ids)
@@ -115,16 +144,22 @@ class KnowledgeBase:
         """
         语义检索：根据 query 返回最相关的文档片段。
 
-        ChromaDB 内部自动将 query 转为向量，与存储的文档向量做余弦相似度匹配。
+        远端模式先用配置的模型生成 query 向量，再由 ChromaDB 做余弦匹配。
         """
         # 空库没有可检索内容，直接返回，避免首次请求为无意义的 query 下载
         # 默认 Embedding 模型并阻塞用户响应。
         if self._collection.count() == 0:
             return []
-        results = self._collection.query(
-            query_texts=[query],
-            n_results=top_k,
-        )
+        if self._remote_embedding_enabled:
+            results = self._collection.query(
+                query_embeddings=self._embed_texts([query]),
+                n_results=top_k,
+            )
+        else:
+            results = self._collection.query(
+                query_texts=[query],
+                n_results=top_k,
+            )
 
         items = []
         if results["documents"] and results["documents"][0]:
@@ -153,6 +188,44 @@ class KnowledgeBase:
     async def doc_count_async(self) -> int:
         """异步获取文档片段数量。"""
         return await asyncio.to_thread(self._collection.count)
+
+    def _embed_texts(self, texts: List[str]) -> List[List[float]]:
+        """调用 OpenAI 兼容接口；只返回按 input 顺序排列的向量。"""
+        if not self._remote_embedding_enabled:
+            raise RuntimeError("远端 Embedding 未配置")
+        headers = {
+            "Authorization": f"Bearer {self._embedding_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=self._embedding_timeout_s) as client:
+                response = client.post(
+                    self._embedding_endpoint,
+                    headers=headers,
+                    json={"model": self._embedding_model, "input": texts},
+                )
+                response.raise_for_status()
+                data = response.json().get("data", [])
+            vectors = [
+                list(item["embedding"])
+                for item in sorted(data, key=lambda item: int(item.get("index", 0)))
+            ]
+            if len(vectors) != len(texts) or any(not vector for vector in vectors):
+                raise ValueError("返回的向量数量或内容不正确")
+            dimensions = {len(vector) for vector in vectors}
+            if len(dimensions) != 1:
+                raise ValueError("返回的向量维度不一致")
+            return vectors
+        except Exception as ex:
+            raise RuntimeError(f"RAG Embedding 调用失败: {ex}") from ex
+
+    @property
+    def embedding_info(self) -> Dict[str, Any]:
+        return {
+            "provider": "remote" if self._remote_embedding_enabled else "chroma_default",
+            "model": self._embedding_model or "all-MiniLM-L6-v2",
+            "collection": self.collection_name,
+        }
 
     # ── MCP 工具 handler ─────────────────────────────────────────────────────
 

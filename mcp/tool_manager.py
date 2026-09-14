@@ -306,7 +306,7 @@ class MCPToolManager:
             # 原始查询也保留，去重
             return list(dict.fromkeys([query] + queries))
         except Exception as ex:
-            logger.warning(f"查询改写失败，使用原始查询: {ex}")
+            logger.info(f"查询改写不可用，继续使用原始查询: {ex}")
             return [query]
 
     async def search_with_rewrite(
@@ -385,7 +385,7 @@ class MCPToolManager:
             reranked = [items[i] for i in order if 0 <= i < len(items)]
             return reranked[:top_k]
         except Exception as ex:
-            logger.warning(f"重排失败，返回原始顺序: {ex}")
+            logger.info(f"重排不可用，继续使用向量顺序: {ex}")
             return items[:top_k]
 
     # ── 缓存 ──────────────────────────────────────────────────────────────────
